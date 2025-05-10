@@ -1,21 +1,18 @@
-import { config, serverConfig } from "@/config/server";
+import { config } from "@/config/server";
 import { HTTP_TIMEOUT } from "@/constants/timeouts";
 import {http} from "follow-redirects"
 import { BaseConfig, Config, Data } from "@/types/types";
 import {
     catchError,
-    finalize,
     firstValueFrom,
-    forkJoin,
     from,
-    last,
     map,
     Observable,
     of,
-    scan,
     switchMap,
-    takeWhile,
-    tap
+    tap,
+    retry,
+    timer,
 } from 'rxjs';
 
 type Token = {
@@ -28,48 +25,64 @@ function getUserAgent(cfg: BaseConfig): string {
     return cfg.userAgent ?? "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG270 stbapp ver:2 rev: 250 Safari/533.3";
 }
 
+function isTokenValid(tokenKey: string, tokenCacheDuration: number): boolean {
+    if (!authTokenMap.has(tokenKey)) return false;
+    
+    const token = authTokenMap.get(tokenKey)!;
+    const diffSeconds = Math.abs((new Date().getTime() - token.date.getTime()) / 1000);
+    return diffSeconds <= tokenCacheDuration;
+}
+
 function getToken(refresh: boolean = false, cfg: Config = config): Observable<string> {
-    const tokenKey: string = cfg.hostname + cfg.port + cfg.contextPath + cfg.mac;
+    const tokenKey: string = `${cfg.hostname}${cfg.port}${cfg.contextPath}${cfg.mac}`;
     const tokenCacheDuration = config.tokenCacheDuration ?? 5;
 
-    if (!refresh && authTokenMap.has(tokenKey)) {
-
-        const diffSeconds: number = Math.abs((new Date().getTime() - authTokenMap.get(tokenKey)!.date.getTime()) / 1000);
-        if (diffSeconds > tokenCacheDuration) {
-            // console.debug(chalk.blueBright(`Removed cached token for http://${cfg.hostname}:${cfg.port}${cfg.contextPath ? '/' + cfg.contextPath : ''} [${cfg.mac}]`));
-            authTokenMap.delete(tokenKey);
-        } else {
-            // Get token from map if found
-            return of(authTokenMap.get(tokenKey)!.token);
-        }
+    if (!refresh && isTokenValid(tokenKey, tokenCacheDuration)) {
+        console.debug(`Using cached token for ${cfg.hostname}`);
+        return of(authTokenMap.get(tokenKey)!.token);
     }
+    
+    console.debug(`Requesting new token for ${cfg.hostname} (refresh: ${refresh})`);
 
-    // Fetch a new token
-    return from(fetchData<Data<{ token: string }>>('/server/load.php?type=stb&action=handshake', false,
-        {
-            'Accept': 'application/json',
-            'User-Agent': getUserAgent(cfg),
-            'X-User-Agent':  getUserAgent(cfg),
-            'Cookie': `mac=${cfg.mac}; stb_lang=en`,
-        }, '', cfg))
+    const headers = {
+        'Accept': 'application/json',
+        'User-Agent': getUserAgent(cfg),
+        'X-User-Agent': getUserAgent(cfg),
+        'Cookie': `mac=${cfg.mac}; stb_lang=en`,
+    };
+
+    return from(fetchData<Data<{ token: string }>>('/server/load.php?type=stb&action=handshake', false, headers, '', cfg))
         .pipe(
-            map(data => data?.js?.token),
+            map(data => {
+                console.log(data);
+                
+                if (!data?.js?.token) throw new Error('Invalid token response');
+                return data.js.token;
+            }),
             switchMap((token: string) => {
-                return from(fetchData<Data<any>>(`/server/load.php?type=stb&action=get_profile&hd=1&auth_second_step=0&num_banks=1&stb_type=MAG270&image_version=&hw_version=&not_valid_token=0&device_id=${cfg.deviceId1}&device_id2=${cfg.deviceId2}&signature=&sn=${cfg.serialNumber!}&ver=`, false,
-                    {
-                        'Accept': 'application/json',
-                        'User-Agent': getUserAgent(cfg),
-                        'X-User-Agent':   getUserAgent(cfg),
-                        'Cookie': `mac=${cfg.mac}; stb_lang=en`,
-                        'Authorization': `Bearer ${token}`,
-                        'SN': cfg.serialNumber!
-                    }, '', cfg)).pipe(
-                    map(x => token),
-                    tap(x => {
+                const profileHeaders = {
+                    ...headers,
+                    'Authorization': `Bearer ${token}`,
+                    'SN': cfg.serialNumber!
+                };
+                const profileUrl = `/server/load.php?type=stb&action=get_profile&hd=1&auth_second_step=0&num_banks=1&stb_type=MAG270&image_version=&hw_version=&not_valid_token=0&device_id=${cfg.deviceId1}&device_id2=${cfg.deviceId2}&signature=&sn=${cfg.serialNumber!}&ver=`;
+                
+                return from(fetchData<Data<any>>(profileUrl, false, profileHeaders, '', cfg)).pipe(
+                    map(() => token),
+                    tap(() => {
                         console.debug(`Fetched token for http://${cfg.hostname}:${cfg.port}${cfg.contextPath ? '/' + cfg.contextPath : ''} [${cfg.mac}] (renewed in ${tokenCacheDuration} seconds)`);
-                        return authTokenMap.set(tokenKey, {token: token, date: new Date()});
+                        authTokenMap.set(tokenKey, { token, date: new Date() });
                     })
-                )
+                );
+            }),
+            retry({
+                count: 3,
+                resetOnSuccess: true,
+                delay: 2000
+            }),
+            catchError(error => {
+                console.error(`Failed to get token for ${cfg.hostname}: ${error.message}`);
+                throw error;
             })
         );
 }
@@ -77,121 +90,133 @@ function getToken(refresh: boolean = false, cfg: Config = config): Observable<st
 export function fetchData<T>(path: string, ignoreError: boolean = false, headers: {
     [key: string]: string
 } = {}, token: string = '', cfg: Config = config): Promise<T> {
-
-    return new Promise<T>((resp, err) => {
-
-        const completePath = (!!cfg.contextPath ? '/' + cfg.contextPath : '') + path;
-
-        const onError: (e: any) => void
-            = (e) => {
-            console.error(`Error at http://${cfg.hostname}:${cfg.port}${completePath} [${cfg.mac}] (ignore: ${ignoreError})`);
-            if (ignoreError) {
-                resp(<T>{});
-            } else {
-                err(e);
-            }
-        };
-
-        let token$: Observable<string>;
-        const headersProvided: boolean = Object.keys(headers).length !== 0;
-        if (!headersProvided) {
-            token$ = getToken(false, cfg);
-        } else {
-            token$ = of(token);
-        }
-
-        token$
-            .subscribe((token) => {
-                // console.debug((!!config.contextPath ? '/' + config.contextPath : '') + path);
-                try {
-
-                    if (!headersProvided) {
-                        headers = {
-                            'Accept': 'application/json',
-                            'User-Agent': getUserAgent(cfg),
-                            'X-User-Agent': getUserAgent(cfg),
-                            'Cookie': `mac=${cfg.mac}; stb_lang=en`,
-                            'SN': cfg.serialNumber!
-                        };
-                        if (!!token) {
-                            headers['Authorization'] = `Bearer ${token}`;
-                        }
+    const completePath = (!!cfg.contextPath ? '/' + cfg.contextPath : '') + path;
+    console.debug(`Initiating request to ${cfg.hostname}:${cfg.port}${completePath}`);
+    const headersProvided: boolean = Object.keys(headers).length !== 0;
+    
+    const token$ = headersProvided ? of(token) : getToken(false, cfg);
+    
+    return firstValueFrom(
+        token$.pipe(
+            map(token => {
+                if (!headersProvided) {
+                    headers = {
+                        'Accept': 'application/json',
+                        'User-Agent': getUserAgent(cfg),
+                        'X-User-Agent': getUserAgent(cfg),
+                        'Cookie': `mac=${cfg.mac}; stb_lang=en`,
+                        'SN': cfg.serialNumber!
+                    };
+                    if (!!token) {
+                        headers['Authorization'] = `Bearer ${token}`;
+                    }
+                }
+                return headers;
+            }),
+            switchMap(headers => new Observable<T>(observer => {
+                const req = http.get({
+                    hostname: cfg.hostname,
+                    port: cfg.port,
+                    path: completePath,
+                    method: 'GET',
+                    headers: headers,
+                    timeout: HTTP_TIMEOUT
+                }, (res: any) => {
+                    console.debug(`Received response from ${cfg.hostname}:${cfg.port}${completePath} (status: ${res.statusCode})`);
+                    if (res.statusCode !== 200) {
+                        observer.error(new Error(`HTTP ${res.statusCode}: Did not get an OK from the server`));
+                        res.resume();
+                        return;
                     }
 
-                    const req = http.get({
-                        hostname: cfg.hostname,
-                        port: cfg.port,
-                        path: completePath,
-                        method: 'GET',
-                        headers: headers,
-                        timeout: HTTP_TIMEOUT
-                    }, (res: any) => {
-
-                        if (res.statusCode !== 200) {
-                            console.error(`Did not get an OK from the server (http://${cfg.hostname}:${cfg.port}${completePath} [${cfg.mac}]). Code: ${res.statusCode}`);
-                            res.resume();
-                            err();
-                        }
-
-                        let data = '';
-
-                        res.on('data', (chunk: any) => {
-                            try {
-                                data += chunk;
-                            } catch (error) {
-                                // console.error('on data error', error);
-                            }
-                        });
-
-                        res.on('close', () => {
-                            // console.debug(`Retrieved data (${data.length} bytes)`);
-                            try {
-                                resp(JSON.parse(!!data ? data : '{}'));
-                            } catch (e) {
-                                //console.error(`Wrong JSON data received: '${data}'`);
-                                console.debug(data);
-                                err(e);
-                            }
-                        });
-
-                        res.on('error', (e: NodeJS.ErrnoException) => {
-                            console.error(`Response stream error: ${e?.message}`);
-                            onError(e);
-                        });
-
-                        res.on('end', () => {
-                            //console.log('No more data in response.');
-                        });
-                    }, (e: any) => {
-                        onError(e);
-                    });
-
-                    // Catch errors on the request
-
-                    req.on('timeout', () => {
+                    let data = '';
+                    res.on('data', (chunk: any) => {
                         try {
-                            onError(`Request timed out after ${HTTP_TIMEOUT} ms`);
-                        } finally {
-                            // Close the request to prevent leaks
-                            req.destroy();
+                          data += chunk;
+                        } catch (error:unknown) {
+                            console.error(
+                            `Error processing chunk from ${cfg.hostname}: ${
+                              error instanceof Error ? error.message : error
+                            }`
+                          );
+                          observer.error(error);
                         }
                     });
 
-                    req.on('error', (e: NodeJS.ErrnoException) => {
-                        if (e.code === 'ECONNRESET') {
-                            console.error('Connection was reset by the remote host.');
-                        } else {
-                            console.error(`Request error: ${e.message}`);
+                    res.on('close', () => {
+                        console.debug(`Completed request to ${cfg.hostname}:${cfg.port}${completePath}`);
+                        try {
+                            // First try to parse as JSON
+                            try {
+                                if (data === 'Authorization failed.') {
+                                    // Handle authorization failure
+                                    getToken(true, cfg).pipe(
+                                        switchMap(newToken => {
+                                            headers['Authorization'] = `Bearer ${newToken}`;
+                                            return fetchData<T>(path, ignoreError, headers, newToken, cfg);
+                                        })
+                                    ).subscribe({
+                                        next: (result) => {
+                                            observer.next(result);
+                                            observer.complete();
+                                        },
+                                        error: (e) => observer.error(e)
+                                    });
+                                    return;
+                                }
+                                const parsedData = JSON.parse(data || '{}');
+                                observer.next(parsedData);
+                            } catch (jsonError) {
+                                // If JSON parsing fails, return the raw string data
+                                observer.next(data as unknown as T);
+                            }
+                            observer.complete();
+                        } catch (e) {
+                            console.error(`Failed to handle response data: ${data}`);
+                            observer.error(e);
                         }
-
-                        onError(e);
                     });
 
-                    req.end();
+                    res.on('error', (e: NodeJS.ErrnoException) => {
+                        observer.error(e);
+                    });
+                });
 
-                } catch (e) {
-                    onError(e);
+                req.on('timeout', () => {
+                    console.warn(`Request timeout for ${cfg.hostname}:${cfg.port}${completePath}`);
+                    req.destroy();
+                    observer.error(new Error(`Request timed out after ${HTTP_TIMEOUT} ms`));
+                });
+
+                req.on('error', (e: NodeJS.ErrnoException) => {
+                    console.error(`Network error for ${cfg.hostname}: ${e.message}`);
+                    observer.error(e);
+                });
+
+                req.end();
+
+                return () => {
+                    req.destroy();
+                };
+            })),
+            catchError(error => {
+                console.error(`Error at http://${cfg.hostname}:${cfg.port}${completePath} [${cfg.mac}] (ignore: ${ignoreError})`);
+                console.error(`Error details: ${error.message}`);
+                if (error.stack) console.debug(`Stack trace: ${error.stack}`);
+                if (ignoreError) {
+                    return of({} as T);
                 }
-            }, onError);
-    });
+                throw error;
+            }),
+            retry({
+                count: 2,
+                delay: (error, retryCount) => {
+                    if (error?.message?.includes('Timeout')) {
+                        console.warn(`Retrying (${retryCount}) after timeout for ${cfg.hostname}`);
+                    }
+                    return timer(2000);
+                }
+            })
+        )
+    );
 }

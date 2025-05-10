@@ -5,9 +5,7 @@ import { playlistRoutes } from './routes/playlist';
 import { liveRoutes } from './routes/live';
 
 const init = async () => {
-    const server = new Server(serverConfig);
-
-    // Register routes
+    const server = new Server(serverConfig);    // Register routes
     server.route(generateGroupRoutes);
     server.route(playlistRoutes);
     server.route(liveRoutes);
