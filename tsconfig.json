@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",               // base directory
+    "paths": {
+      "@/*": ["src/*"]            // allows @/config/server => src/config/server.ts
+    },
+    "outDir": "dist",             // where compiled files go
+    "module": "commonjs",
+    "target": "ES2021",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "sourceMap": true,
+    "rootDir": "src",
+    "lib": ["ES2021"]             // very important for correct path mapping
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
