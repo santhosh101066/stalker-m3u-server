@@ -1,75 +1,54 @@
-import { ArrayData, Channel, Data, Genre, M3U, M3ULine, Programs, Tvg } from "@/types/types";
+import {
+  ArrayData,
+  Channel,
+  Data,
+  Genre,
+  M3U,
+  M3ULine,
+  Programs,
+} from "@/types/types";
 import { fetchData } from "./fetch";
+import { initialConfig } from "@/config/server";
 
-import { readFileSync, writeFileSync } from "fs";
-import { READ_OPTIONS } from "@/constants/common";
-import { config } from "@/config/server";
-
-const tvgData: Tvg = JSON.parse(readFileSync('./tvg.json',{encoding:"utf-8",flag:"r"})) as Tvg;
-const groups = ["TAMIL",
-"TAMIL | 24/7"]
-function removeAccent(str: string): string {
-    return str.normalize("NFD").replace(/\p{Diacritic}/gu, "");
-}
-
-function getTvgId(channel: Channel): string {
-    let tvgId: string = '';
-
-    for (const iterator of Object.entries(tvgData)) {
-        if (!!iterator[1].find(term => removeAccent(channel.name.toLocaleLowerCase())
-            .includes(removeAccent(term.toLocaleLowerCase())))) {
-            tvgId = iterator[0];
-            break;
-        }
-    }
-
-    return tvgId;
-}
-
+const groups = ["TAMIL", "TAMIL | 24/7"];
 
 function channelToM3u(channel: Channel, group: string): M3ULine {
-    const lines: M3ULine = <M3ULine>{};
-
-    // const tvgId: string = !!config.tvgIdPreFill ? getTvgId(channel) : '';
-
-    lines.title = `TV - ${group}`;
-    lines.name = channel.name
-        // Special characters such as "-" and "," mess with the rendering of names
-        .replaceAll(",", "")
-        .replaceAll(" - ", "-");
-    lines.header = `#EXTINF:-1 tvg-id="${channel.id}" tvg-name="${lines.name}" tvg-logo="${decodeURI(channel.logo)}" group-title="${lines.title}",${lines.name}`;
-    lines.command = "http://192.168.0.108:3000/live?cmd="+encodeURIComponent(channel.cmd);
-
-    return lines;
+  return {
+    title: `TV - ${group}`,
+    name: channel.name.replaceAll(",", "").replaceAll(" - ", "-"),
+    header: `#EXTINF:-1 tvg-id="${channel.id}" tvg-name="${channel.name
+      .replaceAll(",", "")
+      .replaceAll(" - ", "-")}" tvg-logo="${decodeURI(
+      channel.logo
+    )}" group-title="TV - ${group}",${channel.name
+      .replaceAll(",", "")
+      .replaceAll(" - ", "-")}`,
+    command: `http://192.168.0.102:3000/live.m3u8?cmd=${encodeURIComponent(
+      channel.cmd
+    )}`,
+  };
 }
 
-export async function getM3u(){
-  const genres = (
-    await fetchData<ArrayData<Genre>>(
-      "/server/load.php?" + "type=itv&action=get_genres"
-    )
-  ).js;
-  const m3u: M3ULine[] = [];
+export async function getM3u() {
+  const genres = await fetchData<ArrayData<Genre>>(
+    "/server/load.php?type=itv&action=get_genres"
+  );
   const allPrograms = await fetchData<Data<Programs<Channel>>>(
     "/server/load.php?type=itv&action=get_all_channels"
   );
 
-  allPrograms.js.data = allPrograms.js.data ?? [];
+  const m3u = (allPrograms.js.data ?? [])
+    .filter((channel) => {
+      const genre = genres.js.find((r) => r.id === channel.tv_genre_id);
+      return genre && groups.includes(genre.title);
+    })
+    .map((channel) => {
+      const genre = genres.js.find((r) => r.id === channel.tv_genre_id)!;
+      return channelToM3u(channel, genre.title);
+    })
+    .sort(
+      (a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name)
+    );
 
-  for (const channel of allPrograms.js.data) {
-    const genre: Genre = genres.find((r) => r.id === channel.tv_genre_id)!;
-
-    if (!!genre && !!genre.title && groups.includes(genre.title)) {
-        console.log(channel);
-        
-      m3u.push(channelToM3u(channel, genre.title));
-    }
-  }
-  let sorting: (a: M3ULine, b: M3ULine) => number = (a, b) => {
-    return a.title.localeCompare(b.title) || a.name.localeCompare(b.name);
-  };
-
-  return new M3U(m3u.sort(sorting)).print(config)
-
+  return new M3U(m3u).print(initialConfig);
 }
-

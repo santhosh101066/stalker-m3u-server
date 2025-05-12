@@ -1,0 +1,10 @@
+{
+  "api": {
+    "timeout": 5000,
+    "retries": 3
+  },
+  "app": {
+    "name": "stalker-m3u-server",
+    "environment": "production"
+  }
+}
