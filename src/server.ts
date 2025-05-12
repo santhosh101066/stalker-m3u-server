@@ -1,11 +1,13 @@
 import { Server } from '@hapi/hapi';
-import { serverConfig } from '@/config/server';
+import { initialConfig, serverConfig } from '@/config/server';
 import { generateGroupRoutes } from '@/routes/generate';
 import { playlistRoutes } from './routes/playlist';
 import { liveRoutes } from './routes/live';
 
+const server = new Server(serverConfig); 
+
 const init = async () => {
-    const server = new Server(serverConfig);    // Register routes
+       // Register routes
     server.route(generateGroupRoutes);
     server.route(playlistRoutes);
     server.route(liveRoutes);

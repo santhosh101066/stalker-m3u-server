@@ -1,4 +1,4 @@
-import { config } from "@/config/server";
+import { initialConfig } from "@/config/server";
 import { HTTP_TIMEOUT } from "@/constants/timeouts";
 import { http } from "follow-redirects";
 import { BaseConfig, Config, Data } from "@/types/types";
@@ -59,10 +59,10 @@ function validateProfile(
 
 function getToken(
   refresh: boolean = false,
-  cfg: Config = config
+  cfg: Config = initialConfig
 ): Observable<string> {
   const tokenKey: string = `${cfg.hostname}${cfg.port}${cfg.contextPath}${cfg.mac}`;
-  const tokenCacheDuration = config.tokenCacheDuration ?? 6000;
+  const tokenCacheDuration = initialConfig.tokenCacheDuration ?? 6000;
 
   if (!refresh && isTokenValid(tokenKey, tokenCacheDuration)) {
     console.debug(`Using cached token for ${cfg.hostname}`);
@@ -113,7 +113,7 @@ export function fetchData<T>(
   ignoreError: boolean = false,
   headers: { [key: string]: string } = {},
   token: string = "",
-  cfg: Config = config,
+  cfg: Config = initialConfig,
   skipProfileCheck: boolean = false
 ): Promise<T> {
   const completePath = (!!cfg.contextPath ? "/" + cfg.contextPath : "") + path;

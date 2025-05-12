@@ -8,7 +8,7 @@ import {
   Programs,
 } from "@/types/types";
 import { fetchData } from "./fetch";
-import { config } from "@/config/server";
+import { initialConfig } from "@/config/server";
 
 const groups = ["TAMIL", "TAMIL | 24/7"];
 
@@ -23,7 +23,7 @@ function channelToM3u(channel: Channel, group: string): M3ULine {
     )}" group-title="TV - ${group}",${channel.name
       .replaceAll(",", "")
       .replaceAll(" - ", "-")}`,
-    command: `http://192.168.0.108:3000/live?cmd=${encodeURIComponent(
+    command: `http://192.168.0.102:3000/live.m3u8?cmd=${encodeURIComponent(
       channel.cmd
     )}`,
   };
@@ -50,5 +50,5 @@ export async function getM3u() {
       (a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name)
     );
 
-  return new M3U(m3u).print(config);
+  return new M3U(m3u).print(initialConfig);
 }

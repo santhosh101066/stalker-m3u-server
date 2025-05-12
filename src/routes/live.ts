@@ -7,6 +7,8 @@ import { from, timer, firstValueFrom } from "rxjs";
 import { retry, catchError } from "rxjs/operators";
 
 const channels: Record<string, string> = {};
+const channelsUrls: Record<string, { baseUrl: string; paths: Array<string> }> =
+  {};
 
 interface RequestOptions {
   method: string;
@@ -30,10 +32,13 @@ const retryConfig = {
 };
 
 async function isUrlValid(url: string): Promise<boolean> {
+  console.log('\x1b[33m%s\x1b[0m', `[URL Validation] Checking URL: ${url}`);
   try {
     const response = await axios.head(url);
+    console.log('\x1b[32m%s\x1b[0m', `[URL Validation] URL is valid: ${url}`);
     return response.status === 200;
-  } catch {
+  } catch (error) {
+    console.log('\x1b[31m%s\x1b[0m', `[URL Validation] URL is invalid: ${url}`);
     return false;
   }
 }
@@ -41,7 +46,7 @@ async function isUrlValid(url: string): Promise<boolean> {
 export const liveRoutes: ServerRoute[] = [
   {
     method: "GET",
-    path: "/live",
+    path: "/live.m3u8",
     handler: async (request, h) => {
       const { cmd } = request.query;
 
@@ -86,15 +91,19 @@ export const liveRoutes: ServerRoute[] = [
           )
         );
 
-        const baseUrl =
-          `/player/${encodeURIComponent(cmd)}/` +
-          url.substring(0, url.lastIndexOf("/") + 1);
+        const baseUrl = `/player/${encodeURIComponent(cmd)}/`;
+
+        channelsUrls[cmd] = {
+          baseUrl: url.substring(0, url.lastIndexOf("/") + 1),
+          paths: [],
+        };
 
         const modifiedBody = response.data
           .split("\n")
-          .map((line) => {
+          .map((line, i) => {
             if (line.startsWith("#") || line.trim() === "") return line;
-            return baseUrl + line;
+            channelsUrls[cmd].paths.push(line);
+            return baseUrl + "?id=" + (channelsUrls[cmd].paths.length - 1);
           })
           .join("\n");
 
@@ -110,10 +119,26 @@ export const liveRoutes: ServerRoute[] = [
     path: "/player/{cmd}/{params*}",
     handler: async (request, h) => {
       const { cmd } = request.params;
+
+      if (!channelsUrls[cmd]?.baseUrl) {
+        try {
+          // Make a new request to /live endpoint to get the URL
+          await axios.get(
+            `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
+              cmd
+            )}`
+          );
+          // The /live endpoint will set channelsUrls[cmd]
+        } catch (error) {
+          console.error("[Player] Error fetching initial stream:", error);
+          return h.response("Stream failed").code(500);
+        }
+      }
+
       const upstreamUrl =
-        request.params.params +
-        "?" +
-        new URLSearchParams(request.query).toString();
+        channelsUrls[cmd].baseUrl +
+        (request.params.params ? request.params.params+"?"+new URLSearchParams(request.query).toString():
+           channelsUrls[cmd].paths[request.query.id]);
       const rangeHeader = request.headers["range"];
 
       console.log(`[Player] Incoming request for: ${upstreamUrl}`);
@@ -137,16 +162,34 @@ export const liveRoutes: ServerRoute[] = [
           options.headers["Range"] = rangeHeader;
         }
 
-        const req = client.request(options, (res) => {
+        const req = client.request(options, async (res) => {
           console.log(
             `[Player] Upstream server responded with status: ${res.statusCode}`
           );
 
           if (res.statusCode !== 200 && res.statusCode !== 206) {
             console.log(
-              `[Player] Redirecting to /live due to upstream status ${res.statusCode}`
+              `[Player] Fetching fresh stream due to upstream status ${res.statusCode}`
             );
-            return resolve(h.redirect(`/live?cmd=${encodeURIComponent(cmd)}`));
+
+            try {
+              // Make a new request to /live endpoint
+              const response = await axios.get(
+                `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
+                  cmd
+                )}`
+              );
+
+              return resolve(
+                h
+                  .response("stream stopped")
+                  .type(res.headers["content-type"] || "application/octet-stream")
+                  .code(res.statusCode??403)
+              );
+            } catch (error) {
+              console.error("[Player] Error fetching fresh stream:", error);
+              return reject(h.response("Stream failed").code(500));
+            }
           }
 
           const response = h
