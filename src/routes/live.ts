@@ -1,6 +1,11 @@
 import { cmdPlayer } from "@/utils/cmdPlayer";
 import axios, { AxiosResponse } from "axios";
-import { ServerRoute } from "@hapi/hapi";
+import {
+  Request,
+  ResponseToolkit,
+  ResponseObject,
+  ServerRoute,
+} from "@hapi/hapi";
 import http from "http";
 import https from "https";
 import { from, timer, firstValueFrom } from "rxjs";
@@ -32,13 +37,13 @@ const retryConfig = {
 };
 
 async function isUrlValid(url: string): Promise<boolean> {
-  console.log('\x1b[33m%s\x1b[0m', `[URL Validation] Checking URL: ${url}`);
+  console.log("\x1b[33m%s\x1b[0m", `[URL Validation] Checking URL: ${url}`);
   try {
     const response = await axios.head(url);
-    console.log('\x1b[32m%s\x1b[0m', `[URL Validation] URL is valid: ${url}`);
+    console.log("\x1b[32m%s\x1b[0m", `[URL Validation] URL is valid: ${url}`);
     return response.status === 200;
   } catch (error) {
-    console.log('\x1b[31m%s\x1b[0m', `[URL Validation] URL is invalid: ${url}`);
+    console.log("\x1b[31m%s\x1b[0m", `[URL Validation] URL is invalid: ${url}`);
     return false;
   }
 }
@@ -118,105 +123,115 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/player/{cmd}/{params*}",
     handler: async (request, h) => {
-      const { cmd } = request.params;
+      async function proxyPlay(
+        request: Request,
+        h: ResponseToolkit,
+        retries = 0
+      ): Promise<ResponseObject> {
+        const { cmd } = request.params;
+        const MAX_RETRIES = 3;
 
-      if (!channelsUrls[cmd]?.baseUrl) {
-        try {
-          // Make a new request to /live endpoint to get the URL
-          await axios.get(
-            `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
-              cmd
-            )}`
-          );
-          // The /live endpoint will set channelsUrls[cmd]
-        } catch (error) {
-          console.error("[Player] Error fetching initial stream:", error);
-          return h.response("Stream failed").code(500);
-        }
-      }
-
-      const upstreamUrl =
-        channelsUrls[cmd].baseUrl +
-        (request.params.params ? request.params.params+"?"+new URLSearchParams(request.query).toString():
-           channelsUrls[cmd].paths[request.query.id]);
-      const rangeHeader = request.headers["range"];
-
-      console.log(`[Player] Incoming request for: ${upstreamUrl}`);
-      if (rangeHeader) {
-        console.log(`[Player] Range header: ${rangeHeader}`);
-      }
-
-      return new Promise((resolve, reject) => {
-        const parsedUrl = new URL(upstreamUrl);
-        const client = parsedUrl.protocol === "https:" ? https : http;
-
-        const options: RequestOptions = {
-          method: "GET",
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port,
-          path: parsedUrl.pathname + parsedUrl.search,
-          headers: {},
-        };
-
-        if (rangeHeader) {
-          options.headers["Range"] = rangeHeader;
-        }
-
-        const req = client.request(options, async (res) => {
-          console.log(
-            `[Player] Upstream server responded with status: ${res.statusCode}`
-          );
-
-          if (res.statusCode !== 200 && res.statusCode !== 206) {
-            console.log(
-              `[Player] Fetching fresh stream due to upstream status ${res.statusCode}`
+        if (!channelsUrls[cmd]?.baseUrl) {
+          try {
+            await axios.get(
+              `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(cmd)}`
             );
+          } catch (error) {
+            console.error("[Player] Error fetching initial stream:", error);
+            return h.response("Failed to initialize stream").code(500);
+          }
+        }
 
-            try {
-              // Make a new request to /live endpoint
-              const response = await axios.get(
-                `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
-                  cmd
-                )}`
-              );
+        const upstreamUrl =
+          channelsUrls[cmd].baseUrl +
+          (request.params.params
+            ? request.params.params +
+              "?" +
+              new URLSearchParams(request.query).toString()
+            : channelsUrls[cmd].paths[request.query.id]);
 
-              return resolve(
-                h
-                  .response("stream stopped")
-                  .type(res.headers["content-type"] || "application/octet-stream")
-                  .code(res.statusCode??403)
-              );
-            } catch (error) {
-              console.error("[Player] Error fetching fresh stream:", error);
-              return reject(h.response("Stream failed").code(500));
+        console.log(`[Player] Incoming request for: ${upstreamUrl}`);
+
+        return new Promise((resolve, reject) => {
+          const parsedUrl = new URL(upstreamUrl);
+          const client = parsedUrl.protocol === "https:" ? https : http;
+
+          // Forward all relevant headers from client request
+          const headers: Record<string, string> = {};
+          ['range', 'user-agent', 'accept', 'accept-encoding'].forEach(header => {
+            if (request.headers[header]) {
+              headers[header] = request.headers[header] as string;
             }
-          }
+          });
 
-          const response = h
-            .response(res)
-            .code(res.statusCode || 200)
-            .type(res.headers["content-type"] || "application/octet-stream");
+          const options: RequestOptions = {
+            method: "GET",
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80"),
+            path: parsedUrl.pathname + parsedUrl.search,
+            headers
+          };
 
-          if (res.headers["content-length"]) {
-            response.header("Content-Length", res.headers["content-length"]);
-          }
+          const req = client.request(options, async (res) => {
+            console.log(`[Player] Upstream status: ${res.statusCode}`);
 
-          if (res.headers["accept-ranges"]) {
-            response.header("Accept-Ranges", res.headers["accept-ranges"]);
-          }
+            if (res.statusCode !== 200 && res.statusCode !== 206) {
+              console.log(`[Player] Bad upstream status: ${res.statusCode}`);
+              
+              // Clear cached URL to force refresh
+              delete channelsUrls[cmd];
 
-          response.header("Cache-Control", "no-cache");
+              if (retries < MAX_RETRIES) {
+                console.log(`[Player] Retrying stream ${retries + 1}/${MAX_RETRIES}`);
+                try {
+                  // Add 1 second delay before retry
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                  const result = await proxyPlay(request, h, retries + 1);
+                  return resolve(result);
+                } catch (err) {
+                  return reject(err);
+                }
+              } else {
+                return reject(h.response("Stream failed after max retries").code(500));
+              }
+            }
 
-          resolve(response);
+            const response = h
+              .response(res)
+              .code(res.statusCode || 200)
+              .type(res.headers["content-type"] || "application/octet-stream");
+
+            // Forward relevant headers from upstream
+            ['content-length', 'accept-ranges', 'content-range'].forEach(header => {
+              if (res.headers[header]) {
+                response.header(header, res.headers[header] as string);
+              }
+            });
+
+            response.header("Cache-Control", "no-cache");
+            resolve(response);
+          });
+
+          req.setTimeout(10000, () => {
+            req.destroy();
+            reject(h.response("Stream request timeout").code(504));
+          });
+
+          req.on("error", (err) => {
+            console.error("[Player] HTTP stream error:", err);
+            reject(h.response("Stream connection failed").code(502));
+          });
+
+          req.end();
         });
+      }
 
-        req.on("error", (err) => {
-          console.error("[Player] HTTP stream error:", err);
-          reject(h.response("Stream failed").code(500));
-        });
-
-        req.end();
-      });
+      try {
+        return await proxyPlay(request, h);
+      } catch (error) {
+        console.error("[Player] Proxy error:", error);
+        return h.response("Stream failed").code(500);
+      }
     },
   },
 ];

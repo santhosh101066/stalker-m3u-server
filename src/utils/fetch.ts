@@ -13,6 +13,7 @@ import {
   tap,
   retry,
   timer,
+  EMPTY,
 } from "rxjs";
 
 type Token = {
@@ -272,6 +273,9 @@ export function fetchData<T>(
       retry({
         count: 2,
         delay: (error, retryCount) => {
+          if (error?.message?.includes("HTTP 404:")) {
+            return EMPTY; // Skip retry for 404
+          }
           if (error?.message?.includes("Timeout")) {
             console.warn(
               `Retrying (${retryCount}) after timeout for ${cfg.hostname}`

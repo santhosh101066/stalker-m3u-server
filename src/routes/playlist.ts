@@ -1,16 +1,16 @@
 import { generateGroup } from "@/utils/generateGroups";
-import { getM3u } from "@/utils/getM3uUrls";
+import { getEPG, getM3u } from "@/utils/getM3uUrls";
 import { ServerRoute } from "@hapi/hapi";
 
-const isEmptyM3u = (content: string) => content.trim() === '#EXTM3U';
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const isEmptyM3u = (content: string) => content.trim() === "#EXTM3U";
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const playlistRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/playlist.m3u",
     handler: async (request, h) => {
-      let m3u = '';
+      let m3u = "";
       const maxRetries = 2;
 
       for (let i = 0; i <= maxRetries; i++) {
@@ -23,6 +23,17 @@ export const playlistRoutes: ServerRoute[] = [
         .response(m3u)
         .type("application/vnd.apple.mpegurl")
         .header("Content-Disposition", 'inline; filename="iptv.m3u"');
+    },
+  },
+  {
+    method: "GET",
+    path: "/epg.xml",
+    handler: async (request, h) => {
+      const epg = await getEPG();
+      return h
+        .response(epg)
+        .type("application/xml")
+        .header("Content-Disposition", 'inline; filename="epg.xml"');
     },
   },
 ];

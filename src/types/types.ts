@@ -51,6 +51,12 @@ export interface Program {
     cmd: string;
 }
 
+export interface EPG_List{
+    start_timestamp: string
+    stop_timestamp: string
+    name: string
+}
+
 export interface Channel extends Program {
     logo: string;
     tv_genre_id: string;
