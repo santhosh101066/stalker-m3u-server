@@ -21,5 +21,5 @@ export async function generateGroup(){
   
   return (response.js ?? []).filter(
     (t) => t.title !== "All" && t.censored !== 1
-  );
+  ).map(({title})=>title);
 }

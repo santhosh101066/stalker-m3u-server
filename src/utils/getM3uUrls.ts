@@ -11,7 +11,6 @@ import {
 import { fetchData } from "./fetch";
 import { initialConfig } from "@/config/server";
 
-const groups = ["TAMIL", "TAMIL | 24/7"];
 
 function channelToM3u(channel: Channel, group: string): M3ULine {
   return {
@@ -41,7 +40,7 @@ export async function getM3u() {
   const m3u = (allPrograms.js.data ?? [])
     .filter((channel) => {
       const genre = genres.js.find((r) => r.id === channel.tv_genre_id);
-      return genre && groups.includes(genre.title);
+      return genre && initialConfig.groups.includes(genre.title);
     })
     .map((channel) => {
       const genre = genres.js.find((r) => r.id === channel.tv_genre_id)!;
@@ -64,7 +63,7 @@ export async function getEPG() {
 
   const channels = (allPrograms.js.data ?? []).filter((channel) => {
     const genre = genres.js.find((r) => r.id === channel.tv_genre_id);
-    return genre && groups.includes(genre.title);
+    return genre && initialConfig.groups.includes(genre.title);
   });
 
   let xmltv = '<?xml version="1.0" encoding="UTF-8"?>\n';

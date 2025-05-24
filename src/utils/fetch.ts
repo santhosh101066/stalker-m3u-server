@@ -25,7 +25,7 @@ const authTokenMap: Map<String, Token> = new Map<String, Token>();
 function getUserAgent(cfg: BaseConfig): string {
   return (
     cfg.userAgent ??
-    "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG270 stbapp ver:2 rev: 250 Safari/533.3"
+    `Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) ${cfg.stbType} stbapp ver:2 rev: 250 Safari/533.3`
   );
 }
 
@@ -49,7 +49,7 @@ function validateProfile(
     Authorization: `Bearer ${token}`,
     SN: cfg.serialNumber!,
   };
-  const profileUrl = `/server/load.php?type=stb&action=get_profile&hd=1&auth_second_step=0&num_banks=1&stb_type=MAG270&image_version=&hw_version=&not_valid_token=0&device_id=${
+  const profileUrl = `/server/load.php?type=stb&action=get_profile&hd=1&auth_second_step=0&num_banks=1&stb_type=${cfg.stbType}&image_version=&hw_version=&not_valid_token=0&device_id=${
     cfg.deviceId1
   }&device_id2=${cfg.deviceId2}&signature=&sn=${cfg.serialNumber!}&ver=`;
 

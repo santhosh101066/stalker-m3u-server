@@ -12,6 +12,7 @@
   "description": "",
   "dependencies": {
     "@hapi/hapi": "^21.4.0",
+    "@hapi/inert": "^7.1.0",
     "axios": "^1.9.0",
     "follow-redirects": "^1.15.9",
     "module-alias": "^2.2.3",
