@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <link href="https://unpkg.com/video.js/dist/video-js.css" rel="stylesheet">
+    <script src="https://unpkg.com/video.js/dist/video.js"></script>
+    <script src="https://unpkg.com/@videojs/http-streaming/dist/videojs-http-streaming.js"></script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Stream</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: black;
+        }
+
+        #player-container {
+            width: 100%;
+            max-width: 800px;
+            aspect-ratio: 16 / 9;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="player-container">
+        <video-js id="my_video_1" class="video-js vjs-default-skin vjs-big-play-centered" controls>
+            <source src="/live.m3u8?cmd=ffrt%20http%3A%2F%2Flocalhost%2Fch%2F24059"
+                type="application/x-mpegURL">
+            <p class="vjs-no-js">
+                To view this video please enable JavaScript, and consider upgrading to a web browser that
+                <a href="https://videojs.com/html5-video-support/" target="_blank">supports HTML5 video</a>
+            </p>
+        </video-js>
+    </div>
+
+    <script>
+        window.onload = function () {
+            const options = {
+                fluid: true,
+                autoplay: true,
+                controls: true,
+                preload: 'auto',
+                html5: {
+                    vhs: {
+                        overrideNative: true,
+                        withCredentials: false
+                    },
+                    nativeAudioTracks: false,
+                    nativeVideoTracks: false
+                },
+                techOrder: ['html5']
+            };
+
+            const player = videojs('my_video_1', options, function() {
+                console.log('Player Ready');
+                this.play();
+            });
+
+            player.on('error', function(e) {
+                const error = player.error();
+                console.error('Video.js Error:', error);
+                
+                if (error && error.code) {
+                    // Try native player as fallback
+                    const video = document.createElement('video');
+                    video.src = "/live.m3u8?cmd=ffrt%20http%3A%2F%2Flocalhost%2Fch%2F24059";
+                    video.controls = true;
+                    video.autoplay = true;
+                    video.playsInline = true;
+                    video.style.width = '100%';
+                    video.style.height = '100%';
+                    const container = document.getElementById('player-container');
+                    container.innerHTML = '';
+                    container.appendChild(video);
+                }
+            });
+        };
+    </script>
+</body>
+
+</html>

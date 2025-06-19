@@ -1,15 +1,14 @@
 import { cmdPlayer } from "@/utils/cmdPlayer";
-import axios, { AxiosResponse } from "axios";
+import axios, { AxiosError, AxiosResponse } from "axios";
 import {
   Request,
   ResponseToolkit,
   ResponseObject,
   ServerRoute,
 } from "@hapi/hapi";
+import { from, firstValueFrom } from "rxjs";
 import http from "http";
 import https from "https";
-import { from, timer, firstValueFrom } from "rxjs";
-import { retry, catchError } from "rxjs/operators";
 
 const channels: Record<string, string> = {};
 const channelsUrls: Record<string, { baseUrl: string; paths: Array<string> }> =
@@ -23,38 +22,13 @@ interface RequestOptions {
   headers: Record<string, string>;
 }
 
-// Replace retryWithDelay function with retry config
-const retryConfig = {
-  count: 3,
-  delay: (error: Error, retryCount: number) => {
-    console.log(
-      `Retry attempt ${retryCount} after ${
-        1000 * Math.pow(2, retryCount - 1)
-      }ms`
-    );
-    return timer(1000 * Math.pow(2, retryCount - 1));
-  },
-};
-
-async function isUrlValid(url: string): Promise<boolean> {
-  console.log("\x1b[33m%s\x1b[0m", `[URL Validation] Checking URL: ${url}`);
-  try {
-    const response = await axios.head(url);
-    console.log("\x1b[32m%s\x1b[0m", `[URL Validation] URL is valid: ${url}`);
-    return response.status === 200;
-  } catch (error) {
-    console.log("\x1b[31m%s\x1b[0m", `[URL Validation] URL is invalid: ${url}`);
-    return false;
-  }
-}
-
 export const liveRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
       const { cmd } = request.query;
-
+      
       if (!cmd) {
         return h.response({ error: "Invalid command" }).code(400);
       }
@@ -62,59 +36,81 @@ export const liveRoutes: ServerRoute[] = [
       try {
         let url: string | undefined;
 
-        // First check if we have a cached URL and it's still valid
         if (channels[cmd]) {
-          const isValid = await isUrlValid(channels[cmd]);
-          if (isValid) {
+          try {
+            const res = await axios.head(channels[cmd]);
             url = channels[cmd];
-          } else {
-            delete channels[cmd]; // Remove invalid URL from cache
+          } catch (error) {
+            console.log(
+              "\x1b[31m%s\x1b[0m",
+              `[URL Validation] Invalid cached URL: ${channels[cmd]}`
+            );
+            delete channels[cmd];
+            // if (axios.isAxiosError(error) && error.response) {
+            //   return h.response({ error: "Invalid cached URL" }).code(error.response.status);
+            // }
           }
         }
 
-        // If no valid cached URL, get new one from cmdPlayer
         if (!url) {
-          url = await firstValueFrom(
-            from(cmdPlayer(cmd)).pipe(
-              retry(retryConfig),
-              catchError((error) => {
-                console.error("Failed after retries:", error);
-                throw error;
-              })
-            )
-          );
-          channels[cmd] = url;
+          try {
+            url = await cmdPlayer(cmd);
+            if (!url) return h.response("Stream Not Found").code(404);
+            channels[cmd] = url;
+          } catch (error) {
+            if (axios.isAxiosError(error) && error.response) {
+              return h
+                .response({ error: "Failed to generate URL" })
+                .code(error.response.status);
+            }
+            throw error;
+          }
         }
 
-        const response: AxiosResponse<string> = await firstValueFrom(
-          from(axios.get(url)).pipe(
-            retry(retryConfig),
-            catchError((error) => {
-              console.error("Failed to fetch stream after retries:", error);
-              throw error;
+        try {
+          let response: AxiosResponse<string> = await axios.get(url, {
+            maxRedirects: 0,
+            validateStatus: (status) => [200, 301, 302, 206].includes(status),
+          });
+
+          if ([301, 302].includes(response.status)) {
+            const location = response.headers.location;
+            if (location) {
+              const redirectUrl = new URL(location, url).href;
+              console.log(`[M3U8] Redirect to: ${redirectUrl}`);
+              url = redirectUrl;
+              channels[cmd] = url;
+              // Fetch the actual content after getting redirect
+              response = await axios.get(url);
+            }
+          }
+
+          const baseUrl = `/player/${encodeURIComponent(cmd)}/`;
+          channelsUrls[cmd] = {
+            baseUrl: url.substring(0, url.lastIndexOf("/") + 1),
+            paths: [],
+          };
+
+          const modifiedBody = response.data
+            .split("\n")
+            .map((line, i) => {
+              if (line.startsWith("#") || line.trim() === "") return line;
+              channelsUrls[cmd].paths.push(line);
+              return baseUrl + "?id=" + (channelsUrls[cmd].paths.length - 1);
             })
-          )
-        );
+            .join("\n");
 
-        const baseUrl = `/player/${encodeURIComponent(cmd)}/`;
-
-        channelsUrls[cmd] = {
-          baseUrl: url.substring(0, url.lastIndexOf("/") + 1),
-          paths: [],
-        };
-
-        const modifiedBody = response.data
-          .split("\n")
-          .map((line, i) => {
-            if (line.startsWith("#") || line.trim() === "") return line;
-            channelsUrls[cmd].paths.push(line);
-            return baseUrl + "?id=" + (channelsUrls[cmd].paths.length - 1);
-          })
-          .join("\n");
-
-        return h.response(modifiedBody).type("application/vnd.apple.mpegurl");
+          return h.response(modifiedBody).type("application/vnd.apple.mpegurl");
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response) {
+            return h
+              .response({ error: "Failed to fetch stream" })
+              .code(error.response.status);
+          }
+          throw error;
+        }
       } catch (error) {
-        console.error("Error with retries:", error);
+        console.log("Error:", (error as Error).message);
         return h.response({ error: "Failed to generate URL" }).code(500);
       }
     },
@@ -125,19 +121,19 @@ export const liveRoutes: ServerRoute[] = [
     handler: async (request, h) => {
       async function proxyPlay(
         request: Request,
-        h: ResponseToolkit,
-        retries = 0
+        h: ResponseToolkit
       ): Promise<ResponseObject> {
         const { cmd } = request.params;
-        const MAX_RETRIES = 3;
 
         if (!channelsUrls[cmd]?.baseUrl) {
           try {
             await axios.get(
-              `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(cmd)}`
+              `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
+                cmd
+              )}`
             );
           } catch (error) {
-            console.error("[Player] Error fetching initial stream:", error);
+            console.error("[Player] Error fetching initial stream:", (error as Error).message);
             return h.response("Failed to initialize stream").code(500);
           }
         }
@@ -158,41 +154,45 @@ export const liveRoutes: ServerRoute[] = [
 
           // Forward all relevant headers from client request
           const headers: Record<string, string> = {};
-          ['range', 'user-agent', 'accept', 'accept-encoding'].forEach(header => {
-            if (request.headers[header]) {
-              headers[header] = request.headers[header] as string;
+          ["range", "user-agent", "accept", "accept-encoding"].forEach(
+            (header) => {
+              if (request.headers[header]) {
+                headers[header] = request.headers[header] as string;
+              }
             }
-          });
+          );
 
           const options: RequestOptions = {
             method: "GET",
             hostname: parsedUrl.hostname,
-            port: parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80"),
+            port:
+              parsedUrl.port ||
+              (parsedUrl.protocol === "https:" ? "443" : "80"),
             path: parsedUrl.pathname + parsedUrl.search,
-            headers
+            headers,
           };
 
           const req = client.request(options, async (res) => {
             console.log(`[Player] Upstream status: ${res.statusCode}`);
 
-            if (res.statusCode !== 200 && res.statusCode !== 206) {
+            if (![200, 206, 301, 302].includes(res.statusCode || 0)) {
               console.log(`[Player] Bad upstream status: ${res.statusCode}`);
-              
-              // Clear cached URL to force refresh
               delete channelsUrls[cmd];
+              return reject(h.response("Stream failed").code(500));
+            }
 
-              if (retries < MAX_RETRIES) {
-                console.log(`[Player] Retrying stream ${retries + 1}/${MAX_RETRIES}`);
-                try {
-                  // Add 1 second delay before retry
-                  await new Promise(resolve => setTimeout(resolve, 1000));
-                  const result = await proxyPlay(request, h, retries + 1);
-                  return resolve(result);
-                } catch (err) {
-                  return reject(err);
-                }
-              } else {
-                return reject(h.response("Stream failed after max retries").code(500));
+            if ([301, 302].includes(res.statusCode || 0)) {
+              const location = res.headers.location;
+              if (location) {
+                const redirectUrl = new URL(location, upstreamUrl).href;
+                console.log(`[Player] Redirect to: ${redirectUrl}`);
+                channelsUrls[cmd] = {
+                  baseUrl: redirectUrl.substring(
+                    0,
+                    redirectUrl.lastIndexOf("/") + 1
+                  ),
+                  paths: channelsUrls[cmd].paths,
+                };
               }
             }
 
@@ -202,7 +202,12 @@ export const liveRoutes: ServerRoute[] = [
               .type(res.headers["content-type"] || "application/octet-stream");
 
             // Forward relevant headers from upstream
-            ['content-length', 'accept-ranges', 'content-range'].forEach(header => {
+            [
+              "content-length",
+              "accept-ranges",
+              "content-range",
+              "transfer-encoding",
+            ].forEach((header) => {
               if (res.headers[header]) {
                 response.header(header, res.headers[header] as string);
               }
@@ -229,7 +234,7 @@ export const liveRoutes: ServerRoute[] = [
       try {
         return await proxyPlay(request, h);
       } catch (error) {
-        console.error("[Player] Proxy error:", error);
+        console.error("[Player] Proxy error");
         return h.response("Stream failed").code(500);
       }
     },

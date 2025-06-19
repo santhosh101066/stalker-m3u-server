@@ -14,7 +14,7 @@ export const playlistRoutes: ServerRoute[] = [
       const maxRetries = 2;
 
       for (let i = 0; i <= maxRetries; i++) {
-        m3u = await getM3u();
+        m3u = await getM3u(h.request.headers.host);
         if (!isEmptyM3u(m3u)) break;
         if (i < maxRetries) await delay(1000); // 1 second delay between retries
       }

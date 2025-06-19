@@ -7,5 +7,5 @@ export async function cmdPlayer(cmd: string) {
       "type=itv&action=create_link&cmd=" +
       encodeURIComponent(cmd)
   );
-  return response.js.cmd;
+  return response.js?.cmd;
 }
