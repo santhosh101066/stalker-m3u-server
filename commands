@@ -9,13 +9,3 @@ docker rmi stalker-m3u-server
 docker load < stalker-m3u-server.tar
 docker run -d --restart=always -p 3000:3000 --name stalker-m3u-server stalker-m3u-server
 docker logs --follow stalker-m3u-server
-
-
-docker run  \
-  -v $(pwd)/cloudflared:/etc/cloudflared \
-  cloudflare/cloudflared:latest \
-  tunnel create stalker-prod
-
-docker run cloudflare/cloudflared:latest tunnel 
-
-/home/nonroot/.cloudflared/cert.pem
