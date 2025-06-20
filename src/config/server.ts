@@ -16,6 +16,7 @@ const ConfigDefault: Config = {
   mac: "00:1A:79:12:34:56",
   stbType: "MAG270",
   groups: ["Tamil"],
+  proxy: false,
 };
 
 export let initialConfig: Config = ConfigDefault;

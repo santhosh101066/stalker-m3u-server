@@ -22,6 +22,7 @@ export interface Config extends BaseConfig {
   vodOrdering?: VodOrdering;
   testM3uFile?: boolean;
   groups: string[];
+  proxy: boolean;
 }
 
 export type VodOrdering = "none" | "rating" | "alphabetic";

@@ -34,6 +34,9 @@ let lastRateLimitHit = 0;
 const MAX_RETRIES = 0;
 const RETRY_DELAY = 2000;
 
+const DELAY_BETWEEN_REQUESTS = 500;
+const AUTH_FAILED_MESSAGE = "Authorization failed.";
+
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function retryOperation<T>(
@@ -167,6 +170,8 @@ export async function fetchData<T>(
     console.debug(
       `Initiating request to ${cfg.hostname}:${cfg.port}${completePath}`
     );
+
+    // Rate limit check
     const currentTime = Date.now();
     if (currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT) {
       // await delay(2000)
@@ -189,7 +194,7 @@ export async function fetchData<T>(
     }
 
     try {
-      await delay(500);
+      await delay(DELAY_BETWEEN_REQUESTS);
       let response = await axios.get<T>(
         `http://${cfg.hostname}:${cfg.port}${completePath}`,
         {
@@ -200,7 +205,7 @@ export async function fetchData<T>(
       );
 
       if (
-        response.data === "Authorization failed." &&
+        response.data === AUTH_FAILED_MESSAGE &&
         !isProfileCheck &&
         !(currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT)
       ) {
@@ -223,7 +228,7 @@ export async function fetchData<T>(
       if (axios.isAxiosError(error)) {
         if (
           error.response?.status === 401 ||
-          error.response?.data === "Authorization failed."
+          error.response?.data === AUTH_FAILED_MESSAGE
         ) {
           await delay(500);
           const newToken = await getToken(true, cfg);
@@ -239,9 +244,11 @@ export async function fetchData<T>(
           throw new Error("Rate limit exceeded. Please wait.");
         }
 
-        console.error(
-          `Request failed for ${cfg.hostname}:${completePath} : ${error.message}`
-        );
+        console.error(`Request failed for ${cfg.hostname}:${completePath}`, {
+          status: error.response?.status,
+          message: error.message,
+          path: completePath
+        });
 
         if (ignoreError) return {} as T;
         throw new Error(`HTTP ${error.response?.status}: ${error.message}`);

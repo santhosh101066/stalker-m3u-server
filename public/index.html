@@ -84,6 +84,14 @@
                 display: block;
             }
         }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+        }
     </style>
 </head>
 <body>
@@ -133,6 +141,12 @@
                 <div class="helper-text mobile-helper">Tap multiple groups to select them</div>
             </div>
         </div>
+        <div class="form-group">
+            <div class="checkbox-group">
+                <input type="checkbox" id="proxy" name="proxy">
+                <label for="proxy">Use Proxy</label>
+            </div>
+        </div>
         <button type="submit">Save Configuration</button>
     </form>
     <div id="message" class="message" style="display: none;"></div>
@@ -171,6 +185,8 @@
                             for (let i = 0; i < options.length; i++) {
                                 options[i].selected = config[key].includes(options[i].value);
                             }
+                        } else if (key === 'proxy') {
+                            input.checked = config[key];
                         } else {
                             input.value = config[key];
                         }
@@ -193,6 +209,9 @@
             // Handle multiselect groups
             config.groups = Array.from(document.getElementById('groups').selectedOptions)
                 .map(option => option.value);
+            
+            // Convert proxy to boolean
+            config.proxy = document.getElementById('proxy').checked;
             
             try {
                 const response = await fetch('/config', {

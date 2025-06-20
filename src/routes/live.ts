@@ -9,6 +9,7 @@ import {
 import { from, firstValueFrom } from "rxjs";
 import http from "http";
 import https from "https";
+import { initialConfig } from "@/config/server";
 
 const channels: Record<string, string> = {};
 const channelsUrls: Record<string, { baseUrl: string; paths: Array<string> }> =
@@ -28,12 +29,17 @@ export const liveRoutes: ServerRoute[] = [
     path: "/live.m3u8",
     handler: async (request, h) => {
       const { cmd } = request.query;
-      
+
       if (!cmd) {
         return h.response({ error: "Invalid command" }).code(400);
       }
 
       try {
+        if (!initialConfig.proxy) {
+          const url = await cmdPlayer(cmd);
+          return h.redirect(url).code(302);
+        }
+
         let url: string | undefined;
 
         if (channels[cmd]) {
@@ -133,7 +139,10 @@ export const liveRoutes: ServerRoute[] = [
               )}`
             );
           } catch (error) {
-            console.error("[Player] Error fetching initial stream:", (error as Error).message);
+            console.error(
+              "[Player] Error fetching initial stream:",
+              (error as Error).message
+            );
             return h.response("Failed to initialize stream").code(500);
           }
         }
