@@ -10,6 +10,8 @@ import {
 } from "@/types/types";
 import { fetchData } from "./fetch";
 import { initialConfig } from "@/config/server";
+import { readJSON } from "./storage";
+import { stalkerApi } from "./stalker";
 
 function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
   return {
@@ -58,6 +60,58 @@ export async function getM3u(host: string) {
 
   return new M3U(m3u).print(initialConfig);
 }
+
+export async function getPlaylist(host: string) {
+  const genres = await fetchData<ArrayData<Genre>>(
+    "/server/load.php?type=itv&action=get_genres"
+  );
+  await delay(500);
+  const allPrograms = await fetchData<Data<Programs<Channel>>>(
+    "/server/load.php?type=itv&action=get_all_channels"
+  );
+
+  const m3u = (allPrograms.js.data ?? []).filter((channel) => {
+    const genre = genres.js.find((r) => r.id === channel.tv_genre_id);
+    return genre && initialConfig.groups.includes(genre.title);
+  });
+
+  return m3u;
+}
+
+export async function getPlaylistV2() {
+  const genres = readJSON<Genre>("channel-groups.json");
+  const allPrograms = await stalkerApi.getChannels();
+  const m3u = (allPrograms.js.data ?? []).filter((channel) => {
+    const genre = genres.find((r) => r.id === channel.tv_genre_id);
+    return genre && initialConfig.groups.includes(genre.title);
+  });
+  return m3u;
+}
+
+export async function getM3uV2(host: string) {
+  const genres = readJSON<Genre>("channel-groups.json");
+  const allPrograms = await stalkerApi.getChannels();
+  // const m3u = (allPrograms.js.data ?? []).filter((channel) => {
+  //   const genre = genres.find((r) => r.id === channel.tv_genre_id);
+  //   return genre && initialConfig.groups.includes(genre.title);
+  // });
+
+  const m3u = (allPrograms.js.data ?? [])
+    .filter((channel) => {
+      const genre = genres.find((r) => r.id === channel.tv_genre_id);
+      return genre && initialConfig.groups.includes(genre.title);
+    })
+    .map((channel) => {
+      const genre = genres.find((r) => r.id === channel.tv_genre_id)!;
+      return channelToM3u(channel, genre.title, host);
+    })
+    .sort(
+      (a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name)
+    );
+
+  return new M3U(m3u).print(initialConfig);
+}
+
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function getEPG() {
@@ -94,6 +148,64 @@ export async function getEPG() {
           `/server/load.php?type=epg&action=get_all_program_for_ch&ch_id=${channel.id}`
         );
 
+        if (epg?.js) {
+          epg.js.forEach((program) => {
+            xmltv += `  <programme start="${formatTimestamp(
+              program.start_timestamp
+            )}" stop="${formatTimestamp(program.stop_timestamp)}" channel="${
+              channel.id
+            }">\n`;
+            xmltv += `    <title>${escapeXML(program.name)}</title>\n`;
+            xmltv += `  </programme>\n`;
+          });
+        }
+      } catch (error) {
+        console.error(
+          `Failed to fetch EPG data for channel ${channel.name}:`,
+          error
+        );
+      }
+    })
+  );
+
+  xmltv += "</tv>";
+  return xmltv;
+}
+
+export async function getEPGV2() {
+  const genres = readJSON<Genre>("channel-groups.json");
+  const allPrograms = await stalkerApi.getChannels();
+  const channels = (allPrograms.js.data ?? []).filter((channel) => {
+    const genre = genres.find((r) => r.id === channel.tv_genre_id);
+    return genre && initialConfig.groups.includes(genre.title);
+  });
+
+  let xmltv = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  xmltv += '<!DOCTYPE tv SYSTEM "xmltv.dtd">\n';
+  xmltv += '<tv generator-info-name="Stalker M3U Server">\n';
+
+  // Add channel definitions
+  channels.forEach((channel) => {
+    xmltv += `  <channel id="${channel.id}">\n`;
+    xmltv += `    <display-name>${channel.name}</display-name>\n`;
+    xmltv += `    <icon src="${
+      channel.logo
+        ? decodeURI(
+            `http://${initialConfig.hostname}:${initialConfig.port}${
+              initialConfig.contextPath !== ""
+                ? "/" + initialConfig.contextPath
+                : ""
+            }/misc/logos/320/${channel.logo}`
+          )
+        : ""}"/>\n`;
+    xmltv += `  </channel>\n`;
+  });
+
+  // Add programme data for all channels in parallel
+  await Promise.all(
+    channels.map(async (channel) => {
+      try {
+        const epg = await stalkerApi.getEPG(channel.id);
         if (epg?.js) {
           epg.js.forEach((program) => {
             xmltv += `  <programme start="${formatTimestamp(

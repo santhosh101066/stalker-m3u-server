@@ -1,6 +1,6 @@
 import { initialConfig } from "@/config/server";
 import { HTTP_TIMEOUT } from "@/constants/timeouts";
-import axios from "axios";
+import axios, { AxiosResponse } from "axios";
 import { BaseConfig, Config, Data } from "@/types/types";
 
 type Token = {
@@ -37,7 +37,7 @@ const RETRY_DELAY = 2000;
 const DELAY_BETWEEN_REQUESTS = 500;
 const AUTH_FAILED_MESSAGE = "Authorization failed.";
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function retryOperation<T>(
   operation: () => Promise<T>,
@@ -91,7 +91,7 @@ async function validateProfile(
   }&device_id2=${cfg.deviceId2}&signature=&sn=${cfg.serialNumber!}&ver=`;
 
   try {
-    await fetchData<Data<any>>(
+    const res = await fetchData<Data<any>>(
       profileUrl,
       false,
       profileHeaders,
@@ -162,7 +162,8 @@ export async function fetchData<T>(
   headers: { [key: string]: string } = {},
   token: string = "",
   cfg: Config = initialConfig,
-  isProfileCheck: boolean = false
+  isProfileCheck: boolean = false,
+  data: any = null
 ): Promise<T> {
   return retryOperation(async () => {
     const completePath =
@@ -173,10 +174,10 @@ export async function fetchData<T>(
 
     // Rate limit check
     const currentTime = Date.now();
-    if (currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT) {
-      // await delay(2000)
-      return {} as T
-    }
+    // if (currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT) {
+    //   // await delay(2000)
+    //   return {} as T;
+    // }
 
     const headersProvided: boolean = Object.keys(headers).length !== 0;
 
@@ -192,22 +193,40 @@ export async function fetchData<T>(
         SN: cfg.serialNumber!,
       };
     }
+    console.log(token);
 
     try {
       await delay(DELAY_BETWEEN_REQUESTS);
-      let response = await axios.get<T>(
-        `http://${cfg.hostname}:${cfg.port}${completePath}`,
-        {
-          headers,
-          timeout: HTTP_TIMEOUT,
-          validateStatus: (status) => status === 200,
-        }
-      );
+      let response:  AxiosResponse<T, any>;
+      if (!data) {
+        response = await axios.get<T>(
+          `http://${cfg.hostname}:${cfg.port}${completePath}`,
+          {
+            headers,
+            timeout: HTTP_TIMEOUT,
+            validateStatus: (status) => status === 200,
+          }
+        );
+      } else {
+        response = await axios.post<T>(
+          `http://${cfg.hostname}:${cfg.port}${completePath}`,
+          data,
+          {
+            headers,
+            timeout: HTTP_TIMEOUT,
 
+            validateStatus: (status) => status === 200,
+          }
+        );
+      }
+
+      //  await validateProfile(token, cfg, headers);
+      console.log(response.data);
+      
       if (
         response.data === AUTH_FAILED_MESSAGE &&
-        !isProfileCheck &&
-        !(currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT)
+        !isProfileCheck 
+        // !(currentTime - lastRateLimitHit < RATE_LIMIT_TIMEOUT)
       ) {
         await validateProfile(token, cfg, headers);
         response = await axios.get<T>(
@@ -223,6 +242,8 @@ export async function fetchData<T>(
       console.debug(
         `Completed request to ${cfg.hostname}:${cfg.port}${completePath}`
       );
+      console.log(response);
+      
       return response.data;
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -247,7 +268,7 @@ export async function fetchData<T>(
         console.error(`Request failed for ${cfg.hostname}:${completePath}`, {
           status: error.response?.status,
           message: error.message,
-          path: completePath
+          path: completePath,
         });
 
         if (ignoreError) return {} as T;

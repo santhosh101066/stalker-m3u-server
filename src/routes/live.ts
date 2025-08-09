@@ -1,4 +1,4 @@
-import { cmdPlayer } from "@/utils/cmdPlayer";
+import { cmdPlayer, cmdPlayerV2 } from "@/utils/cmdPlayer";
 import axios, { AxiosError, AxiosResponse } from "axios";
 import {
   Request,
@@ -36,7 +36,7 @@ export const liveRoutes: ServerRoute[] = [
 
       try {
         if (!initialConfig.proxy) {
-          const url = await cmdPlayer(cmd);
+          const url = await cmdPlayerV2(cmd);
           return h.redirect(url).code(302);
         }
 
@@ -60,7 +60,7 @@ export const liveRoutes: ServerRoute[] = [
 
         if (!url) {
           try {
-            url = await cmdPlayer(cmd);
+            url = await cmdPlayerV2(cmd);
             if (!url) return h.response("Stream Not Found").code(404);
             channels[cmd] = url;
           } catch (error) {

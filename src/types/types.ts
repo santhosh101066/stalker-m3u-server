@@ -52,6 +52,7 @@ export interface Program {
   id: string;
   name: string;
   cmd: string;
+  number?: number;
 }
 
 export interface EPG_List {
@@ -63,6 +64,7 @@ export interface EPG_List {
 export interface Channel extends Program {
   logo: string;
   tv_genre_id: string;
+  censored: string;
 }
 
 export interface Video extends Program {
@@ -156,3 +158,26 @@ export type UrlConfig = Pick<
   Partial<Pick<Config, "mac">>;
 
 export type Tvg = Readonly<Record<string, string[]>>;
+
+export interface Movie extends Program {
+  screenshot_uri: string;
+  category_id: string;
+  time: number;
+  rating_imdb: string;
+}
+
+export interface Serie extends Program {
+  screenshot_uri: string;
+  category_id: string;
+  series: Array<number>;
+}
+
+export interface MoviesApiParams {
+  category: number;
+  page: number;
+  movieId?: number;
+  seasonId?: number;
+  episodeId?: number;
+  disableProfile?: boolean;
+  search?: string;
+}

@@ -1,4 +1,3 @@
-
 import { serverConfig } from "@/config/server";
 import { generateGroupRoutes } from "@/routes/generate";
 import { playlistRoutes } from "./routes/playlist";
@@ -7,6 +6,8 @@ import { configRoutes } from "./routes/config";
 import Hapi from "@hapi/hapi";
 import Inert from "@hapi/inert";
 import { serverManager } from "./serverManager";
+import { moviesRoute } from "./routes/media";
+import { stalkerV2 } from "./routes/stalkerV2";
 
 const init = async () => {
   // Register routes
@@ -20,6 +21,8 @@ const init = async () => {
   server.route(playlistRoutes);
   server.route(liveRoutes);
   server.route(configRoutes);
+  server.route(moviesRoute);
+  server.route(stalkerV2);
   server.route({
     method: "GET",
     path: "/{param*}",
@@ -41,10 +44,12 @@ const init = async () => {
         " " +
         request.path +
         " --> " +
-        (request.response && typeof (request.response as any).statusCode === "number"
+        (request.response &&
+        typeof (request.response as any).statusCode === "number"
           ? (request.response as any).statusCode
-          : (request.response && (request.response as any).output && (request.response as any).output.statusCode)
-        )
+          : request.response &&
+            (request.response as any).output &&
+            (request.response as any).output.statusCode)
     );
   });
 

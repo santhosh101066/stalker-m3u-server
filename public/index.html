@@ -137,6 +137,10 @@
                     </select>
                     <button type="button" id="reloadGroups" style="height: 40px;">🔄 Reload Groups</button>
                 </div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                  <button type="button" id="refreshChannels" style="height: 40px;">🔄 Refresh Channels</button>
+                  <button type="button" id="refreshMovieGroups" style="height: 40px;">🎬 Refresh Movie Groups</button>
+                </div>
                 <div class="helper-text desktop-helper">Hold Ctrl (Windows) or Command (Mac) to select multiple groups</div>
                 <div class="helper-text mobile-helper">Tap multiple groups to select them</div>
             </div>
@@ -155,14 +159,14 @@
         // Add function to load groups
         async function loadGroups() {
             try {
-                const response = await fetch('/groups');
+                const response = await fetch('/api/v2/groups');
                 const groups = await response.json();
                 const selectElement = document.getElementById('groups');
                 selectElement.innerHTML = ''; // Clear existing options
                 groups.forEach(group => {
                     const option = document.createElement('option');
-                    option.value = group;
-                    option.textContent = group;
+                    option.value = group.title;
+                    option.textContent = group.title;
                     selectElement.appendChild(option);
                 });
             } catch (error) {
@@ -198,7 +202,15 @@
         });
 
         // Add reload button handler
-        document.getElementById('reloadGroups').addEventListener('click', loadGroups);
+        document.getElementById('reloadGroups').addEventListener('click', async () => {
+          try {
+            await fetch('/api/v2/refresh-groups', { method: 'POST' });
+            showMessage('Groups refreshed successfully', true);
+          } catch {
+            showMessage('Error refreshing groups', false);
+          }
+          await loadGroups();
+        });
 
         // Handle form submission
         document.getElementById('configForm').addEventListener('submit', async (e) => {
@@ -238,6 +250,25 @@
                 messageDiv.style.display = 'none';
             }, 5000);
         }
+
+        // Add event listeners for refresh buttons
+        document.getElementById('refreshChannels').addEventListener('click', async () => {
+          try {
+            await fetch('/api/v2/refresh-channels', { method: 'POST' });
+            showMessage('Channels refreshed successfully', true);
+          } catch {
+            showMessage('Error refreshing channels', false);
+          }
+        });
+
+        document.getElementById('refreshMovieGroups').addEventListener('click', async () => {
+          try {
+            await fetch('/api/v2/refresh-movie-groups', { method: 'POST' });
+            showMessage('Movie groups refreshed successfully', true);
+          } catch {
+            showMessage('Error refreshing movie groups', false);
+          }
+        });
     </script>
 </body>
 </html>
