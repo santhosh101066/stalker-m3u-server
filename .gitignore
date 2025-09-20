@@ -26,3 +26,4 @@ config.json
 .Trashes
 dist
 stalker-m3u-server.tar
+.mem

@@ -3,12 +3,13 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { serverManager } from '../serverManager';
 import { getInitialConfig, initialConfig } from "@/config/server";
+import { stalkerApi } from "@/utils/stalker";
 
 
 export const configRoutes: ServerRoute[] = [
   {
     method: "GET",
-    path: "/config",
+    path: "/api/config",
     handler: async (request, h) => {
       try {
         return initialConfig
@@ -20,7 +21,7 @@ export const configRoutes: ServerRoute[] = [
   },
   {
     method: "POST",
-    path: "/config",
+    path: "/api/config",
     handler: async (request, h) => {
       try {
         const configPath = path.join(process.cwd(), 'config.json');
@@ -45,6 +46,7 @@ export const configRoutes: ServerRoute[] = [
         try {
              serverManager.restartServer();
              getInitialConfig()
+             stalkerApi.clearCache()
             return { message: 'Configuration updated and server restarted successfully.' };
         } catch (error) {
             console.error('Error restarting server:', error);

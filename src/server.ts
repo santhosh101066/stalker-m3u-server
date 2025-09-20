@@ -1,4 +1,4 @@
-import { serverConfig } from "@/config/server";
+import { initialConfig, serverConfig } from "@/config/server";
 import { generateGroupRoutes } from "@/routes/generate";
 import { playlistRoutes } from "./routes/playlist";
 import { liveRoutes } from "./routes/live";
@@ -8,6 +8,10 @@ import Inert from "@hapi/inert";
 import { serverManager } from "./serverManager";
 import { moviesRoute } from "./routes/media";
 import { stalkerV2 } from "./routes/stalkerV2";
+import path from "path";
+import { proxy } from "./routes/proxy";
+import { stalkerApi } from "./utils/stalker";
+import { portalProxy } from "./routes/portalProxy";
 
 const init = async () => {
   // Register routes
@@ -23,15 +27,31 @@ const init = async () => {
   server.route(configRoutes);
   server.route(moviesRoute);
   server.route(stalkerV2);
+  server.route(proxy);
+  server.route(portalProxy);
+
   server.route({
     method: "GET",
-    path: "/{param*}",
-    handler: {
-      directory: {
-        path: "public",
-        index: ["index.html"],
-        redirectToSlash: true,
-      },
+    path: "/{param*}", // Match all routes
+    handler: (request, h) => {
+      const filePath = path.join(
+        process.cwd(),
+        "public",
+        request.params.param || ""
+      );
+
+      // Serve index.html for unknown files (browser routing)
+      if (
+        !filePath.endsWith(".js") &&
+        !filePath.endsWith(".css") &&
+        !filePath.endsWith(".png") &&
+        !filePath.endsWith(".jpg") &&
+        !filePath.endsWith(".ico")
+      ) {
+        return h.file(path.join(process.cwd(), "public", "index.html"));
+      }
+
+      return h.file(filePath);
     },
   });
 
@@ -55,6 +75,26 @@ const init = async () => {
 
   await server.start();
 
+  // async function scheduleTokenFetcher() {
+  //   try {
+  //     if (initialConfig.tokens.length < 350) {
+  //       const tokenResponse = await stalkerApi.fetchNewToken();
+  //       stalkerApi.addToken(tokenResponse.token);
+  //       console.log(
+  //         `Fetched new token: ${tokenResponse.token}. Total tokens: ${initialConfig.tokens.length}`
+  //       );
+  //     }
+  //   } catch (err) {
+  //     console.error("Error fetching new token:", err);
+  //   }
+
+  //   // Adjust next run interval based on token count
+  //   const nextInterval = initialConfig.tokens.length < 100 ?  1 * 60 * 1000 :  5 * 60 * 1000;
+
+  //   setTimeout(scheduleTokenFetcher, nextInterval);
+  // }
+
+  // scheduleTokenFetcher();
   console.log(`Server running at: ${server.info.uri}`);
 };
 

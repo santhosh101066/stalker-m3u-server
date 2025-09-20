@@ -5,7 +5,7 @@ export const serverConfig = {
   host: "0.0.0.0",
   port: 3000,
   routes: {
-    cors: true,
+    cors: { origin: ["*"] },
   },
 };
 
@@ -17,6 +17,7 @@ const ConfigDefault: Config = {
   stbType: "MAG270",
   groups: ["Tamil"],
   proxy: false,
+  tokens: []
 };
 
 export let initialConfig: Config = ConfigDefault;

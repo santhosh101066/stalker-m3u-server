@@ -22,6 +22,7 @@ export interface Config extends BaseConfig {
   vodOrdering?: VodOrdering;
   testM3uFile?: boolean;
   groups: string[];
+  tokens: string[];
   proxy: boolean;
 }
 
@@ -180,4 +181,5 @@ export interface MoviesApiParams {
   episodeId?: number;
   disableProfile?: boolean;
   search?: string;
+  token?: string;
 }

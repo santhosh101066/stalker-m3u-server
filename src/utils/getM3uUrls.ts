@@ -19,20 +19,24 @@ function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
     name: channel.name.replaceAll(",", "").replaceAll(" - ", "-"),
     header: `#EXTINF:-1 tvg-id="${channel.id}" tvg-name="${channel.name
       .replaceAll(",", "")
-      .replaceAll(" - ", "-")}" tvg-logo="${
-      channel.logo
-        ? decodeURI(
-            `http://${initialConfig.hostname}:${initialConfig.port}${
-              initialConfig.contextPath !== ""
-                ? "/" + initialConfig.contextPath
-                : ""
+      .replaceAll(" - ", "-")}" tvg-logo="${channel.logo
+        ? channel.logo.startsWith("http")
+          ? channel.logo
+          : decodeURI(
+            `http://${initialConfig.hostname}:${initialConfig.port}${initialConfig.contextPath !== ""
+              ? "/" + initialConfig.contextPath
+              : ""
             }/misc/logos/320/${channel.logo}`
           )
         : ""
-    }" group-title="TV - ${group}",${channel.name
-      .replaceAll(",", "")
-      .replaceAll(" - ", "-")}`,
-    command: `http://${host}/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}`,
+      }" group-title="TV - ${group}",${channel.name
+        .replaceAll(",", "")
+        .replaceAll(" - ", "-")}`,
+    command: channel.cmd.includes(initialConfig.hostname)
+      ? `http://${host}/portal/proxy?url=${encodeURIComponent(
+        btoa(channel.cmd.split(" ").at(1) ?? "")
+      )}`
+      : `http://${host}/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}`,
   };
 }
 
@@ -90,13 +94,13 @@ export async function getPlaylistV2() {
 
 export async function getM3uV2(host: string) {
   const genres = readJSON<Genre>("channel-groups.json");
-  const allPrograms = await stalkerApi.getChannels();
+  const allPrograms = readJSON<Channel>("channels.json");
   // const m3u = (allPrograms.js.data ?? []).filter((channel) => {
   //   const genre = genres.find((r) => r.id === channel.tv_genre_id);
   //   return genre && initialConfig.groups.includes(genre.title);
   // });
 
-  const m3u = (allPrograms.js.data ?? [])
+  const m3u = (allPrograms ?? [])
     .filter((channel) => {
       const genre = genres.find((r) => r.id === channel.tv_genre_id);
       return genre && initialConfig.groups.includes(genre.title);
@@ -152,9 +156,8 @@ export async function getEPG() {
           epg.js.forEach((program) => {
             xmltv += `  <programme start="${formatTimestamp(
               program.start_timestamp
-            )}" stop="${formatTimestamp(program.stop_timestamp)}" channel="${
-              channel.id
-            }">\n`;
+            )}" stop="${formatTimestamp(program.stop_timestamp)}" channel="${channel.id
+              }">\n`;
             xmltv += `    <title>${escapeXML(program.name)}</title>\n`;
             xmltv += `  </programme>\n`;
           });
@@ -188,16 +191,15 @@ export async function getEPGV2() {
   channels.forEach((channel) => {
     xmltv += `  <channel id="${channel.id}">\n`;
     xmltv += `    <display-name>${channel.name}</display-name>\n`;
-    xmltv += `    <icon src="${
-      channel.logo
-        ? decodeURI(
-            `http://${initialConfig.hostname}:${initialConfig.port}${
-              initialConfig.contextPath !== ""
-                ? "/" + initialConfig.contextPath
-                : ""
-            }/misc/logos/320/${channel.logo}`
-          )
-        : ""}"/>\n`;
+    xmltv += `    <icon src="${channel.logo
+      ? decodeURI(
+        `http://${initialConfig.hostname}:${initialConfig.port}${initialConfig.contextPath !== ""
+          ? "/" + initialConfig.contextPath
+          : ""
+        }/misc/logos/320/${channel.logo}`
+      )
+      : ""
+      }"/>\n`;
     xmltv += `  </channel>\n`;
   });
 
@@ -210,9 +212,8 @@ export async function getEPGV2() {
           epg.js.forEach((program) => {
             xmltv += `  <programme start="${formatTimestamp(
               program.start_timestamp
-            )}" stop="${formatTimestamp(program.stop_timestamp)}" channel="${
-              channel.id
-            }">\n`;
+            )}" stop="${formatTimestamp(program.stop_timestamp)}" channel="${channel.id
+              }">\n`;
             xmltv += `    <title>${escapeXML(program.name)}</title>\n`;
             xmltv += `  </programme>\n`;
           });

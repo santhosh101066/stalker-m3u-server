@@ -14,9 +14,12 @@
     "@hapi/hapi": "^21.4.0",
     "@hapi/inert": "^7.1.0",
     "axios": "^1.9.0",
+    "crypto": "^1.0.1",
     "follow-redirects": "^1.15.9",
     "module-alias": "^2.2.3",
-    "rxjs": "^7.8.2"
+    "node-cache": "^5.1.2",
+    "rxjs": "^7.8.2",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "@types/follow-redirects": "^1.14.4",
