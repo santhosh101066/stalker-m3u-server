@@ -9,6 +9,8 @@ REMOTE_DIR="~/downloads"
 IMAGE_NAME="stalker-m3u-server"
 TAR_NAME="$IMAGE_NAME.tar"
 
+# docker logs --follow stalker-m3u-server
+
 # --- 1. Build and Package Locally ---
 echo "📦 Building and packaging the Docker image..."
 docker build -t $IMAGE_NAME .
