@@ -1,45 +1,259 @@
-import { cmdPlayer } from "@/utils/cmdPlayer";
-import axios, { AxiosResponse } from "axios";
+import { cmdPlayerV2 } from "@/utils/cmdPlayer";
+import axios, { AxiosError, AxiosResponse } from "axios";
 import { ServerRoute } from "@hapi/hapi";
 import http from "http";
-import https from "https";
-import { from, timer, firstValueFrom } from "rxjs";
-import { retry, catchError } from "rxjs/operators";
+import https, { RequestOptions } from "https";
+import NodeCache from "node-cache";
+import { appConfig, initialConfig } from "@/config/server";
 
-const channels: Record<string, string> = {};
-const channelsUrls: Record<string, { baseUrl: string; paths: Array<string> }> =
-  {};
+const SECRET_KEY = appConfig.proxy.secretKey;
 
-interface RequestOptions {
-  method: string;
-  hostname: string;
-  port: string;
-  path: string;
-  headers: Record<string, string>;
+
+
+function generateSignedUrl(resourceId: string): string {
+  const sig = require("crypto")
+    .createHmac("sha256", SECRET_KEY)
+    .update(resourceId)
+    .digest("hex");
+  return `/player/${encodeURIComponent(resourceId)}?sig=${sig}`;
 }
 
-// Replace retryWithDelay function with retry config
-const retryConfig = {
-  count: 3,
-  delay: (error: Error, retryCount: number) => {
-    console.log(
-      `Retry attempt ${retryCount} after ${
-        1000 * Math.pow(2, retryCount - 1)
-      }ms`
-    );
-    return timer(1000 * Math.pow(2, retryCount - 1));
-  },
-};
+function verifySignedUrl(resourceId: string, sig: string): boolean {
+  const expectedSig = require("crypto")
+    .createHmac("sha256", SECRET_KEY)
+    .update(resourceId)
+    .digest("hex");
+  return sig === expectedSig;
+}
 
-async function isUrlValid(url: string): Promise<boolean> {
-  console.log('\x1b[33m%s\x1b[0m', `[URL Validation] Checking URL: ${url}`);
+interface CacheRecord {
+  baseUrl: string;
+  segments: string[];
+  subpath?: string;
+}
+
+const cache = new NodeCache({ stdTTL: 600, checkperiod: 60 });
+
+const pendingCommands = new Map<string, Promise<string | null>>();
+
+
+
+async function populateCache(cmd: string): Promise<string> {
+  if (pendingCommands.has(cmd)) {
+    const result = await pendingCommands.get(cmd)!;
+    if (result === null) {
+      throw new Error("Stream Not Found");
+    }
+    return result;
+  }
+
+  const promise = cmdPlayerV2(cmd);
+  pendingCommands.set(cmd, promise);
+
+  const masterUrl = await promise.finally(() => {
+    pendingCommands.delete(cmd);
+  });
+
+  if (!masterUrl) {
+    throw new Error("Stream Not Found");
+  }
+
+  const res = await axios.get(masterUrl);
+
+  const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
+
+  const lines = res.data.split("\n");
+  const segments: string[] = [];
+  const modifiedLines = lines.map((line: string) => {
+    if (line.startsWith("#") || line.trim() === "") {
+      return line;
+    }
+    if (line.endsWith(".m3u8")) {
+      // rewrite to re-enter /live.m3u8 route with cmd param
+      return `/live.m3u8?cmd=${encodeURIComponent(
+        cmd
+      )}&subpath=${encodeURIComponent(line)}`;
+    }
+    // media segment line: store and generate signed url
+    const resourceId = `${cmd}<_>${segments.length}`;
+    segments.push(line);
+    return generateSignedUrl(resourceId);
+  });
+  cache.set(cmd, { baseUrl, segments } as CacheRecord);
+  return modifiedLines.join("\n");
+}
+
+async function handleNonProxy(cmd: string, h: any) {
   try {
-    const response = await axios.head(url);
-    console.log('\x1b[32m%s\x1b[0m', `[URL Validation] URL is valid: ${url}`);
-    return response.status === 200;
+    // First try the "redirected" URL
+    const redirectedUrl = await cmdPlayerV2(cmd);
+    if (redirectedUrl) {
+      const res = await axios.get(redirectedUrl, {
+        validateStatus: () => true,
+      });
+
+      // If redirected works → return
+      if (res.status >= 200 && res.status < 300 && res.data) {
+        return h
+          .response(res.data)
+          .type("application/vnd.apple.mpegurl")
+          .code(200);
+      }
+
+      console.warn(
+        `[Non-Proxy] Redirected URL failed with status ${res.status}, falling back...`
+      );
+    }
+
+    // Fallback to the original localhost stream
+    const fallbackUrl = `http://localhost/ch/${encodeURIComponent(cmd)}`;
+    const res2 = await axios.get(fallbackUrl, {
+      validateStatus: () => true,
+    });
+
+    if (res2.status >= 200 && res2.status < 300 && res2.data) {
+      return h
+        .response(res2.data)
+        .type("application/vnd.apple.mpegurl")
+        .code(200);
+    }
+
+    return h
+      .response({ error: `Both redirect and fallback failed (${res2.status})` })
+      .code(res2.status);
+  } catch (err) {
+    console.error("Non-proxy error:", err);
+    return h.response({ error: "Stream fetch failed" }).code(500);
+  }
+}
+
+async function handleProxy(cmd: string, play: string | undefined, h: any) {
+  try {
+    if (!cache.get(cmd)) {
+      await populateCache(cmd);
+    }
+    const record: CacheRecord | undefined = cache.get(cmd);
+    if (!record) {
+      return h.response("Stream Not Found").code(404);
+    }
+
+    const fetchPlaylist = async (url: string, isSubpath: boolean = false) => {
+      const res = await axios.get(url, { validateStatus: () => true });
+
+      if (!isSubpath && [301, 302, 403].includes(res.status)) {
+        // Refresh master URL and retry
+        const newMasterUrl = await cmdPlayerV2(cmd);
+        if (newMasterUrl) {
+          // Update cache baseUrl so future segments work
+          const newBaseUrl = newMasterUrl.substring(
+            0,
+            newMasterUrl.lastIndexOf("/") + 1
+          );
+          if (record) {
+            record.baseUrl = newBaseUrl;
+            cache.set(cmd, record as CacheRecord);
+          }
+
+          // Retry playlist fetch with updated URL
+          const refreshed = await axios.get(newMasterUrl, {
+            validateStatus: () => true,
+          });
+          return refreshed;
+        }
+      }
+      if (res.status < 200 || res.status >= 300 || !res.data) {
+        return h
+          .response({ error: `Upstream Error ${res.status}` })
+          .code(res.status);
+      }
+      return res;
+    };
+    if (play === "1" && record.subpath) {
+      // Fetch sub-playlist
+
+      const subUrl = new URL(record.subpath, record.baseUrl).href;
+
+      let res = await fetchPlaylist(subUrl, true);
+      if ((res as any).isBoom) return res; // Early return if error response;
+      if (!res.data) {
+        const newMasterUrl = await cmdPlayerV2(cmd);
+        if (!newMasterUrl) {
+          return h.response({ error: "Stream Not Found" }).code(404);
+        }
+        const newBaseUrl = newMasterUrl.substring(
+          0,
+          newMasterUrl.lastIndexOf("/") + 1
+        );
+        const refreshedRes = await axios.get(newMasterUrl, {
+          validateStatus: () => true,
+        });
+        if (
+          refreshedRes.status < 200 ||
+          refreshedRes.status >= 300 ||
+          !refreshedRes.data
+        ) {
+          return h
+            .response({ error: `Upstream Error ${refreshedRes.status}` })
+            .code(refreshedRes.status);
+        }
+        record.baseUrl = newBaseUrl;
+        record.subpath = (refreshedRes as AxiosResponse).data
+          .split("\n")
+          .find((line: string) => line.match(".m3u8"));
+
+        cache.set(cmd, record as CacheRecord);
+        if (!record.subpath) {
+          return h
+            .response({ error: "No valid subpath found in new master URL" })
+            .code(404);
+        }
+        const subUrl = new URL(record.subpath, record.baseUrl).href;
+        res = await fetchPlaylist(subUrl, true);
+      }
+
+      const lines = (res as AxiosResponse).data.split("\n");
+      const modifiedLines = lines.map((line: string) => {
+        if (line.startsWith("#") || line.trim() === "") return line;
+        // Do not rewrite .m3u8 lines in subpath playlists
+        if (line.match(".m3u8")) {
+          return line;
+        }
+        const resourceId = `${cmd}<_>${record.segments.length}`;
+        record.segments.push(line);
+        cache.set(cmd, record as CacheRecord);
+        return generateSignedUrl(resourceId);
+      });
+
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
+    } else {
+      // Fetch master playlist
+      const masterUrl = await cmdPlayerV2(cmd);
+      const res = await fetchPlaylist(masterUrl);
+      if ((res as any).isBoom) return res; // Early return if error response
+
+      const lines = (res as AxiosResponse).data.split("\n");
+      const modifiedLines = lines.map((line:string) => {
+        if (line.startsWith("#") || line.trim() === "") return line;
+        if (line.match(".m3u8")) {
+          record.subpath = line;
+          cache.set(cmd, record as CacheRecord);
+          return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1`;
+        }
+        const resourceId = `${cmd}<_>${record.segments.length}`;
+        record.segments.push(line);
+        cache.set(cmd, record as CacheRecord);
+        return generateSignedUrl(resourceId);
+      });
+
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
+    }
   } catch (error) {
-    console.log('\x1b[31m%s\x1b[0m', `[URL Validation] URL is invalid: ${url}`);
-    return false;
+    console.error("Error:", (error as Error)?.stack ?? error);
+    return h.response({ error: "Failed to generate URL" }).code(500);
   }
 }
 
@@ -48,175 +262,117 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
-      const { cmd } = request.query;
-
+      const { cmd, play } = request.query as {
+        cmd?: string;
+        play?: string;
+      };
       if (!cmd) {
-        return h.response({ error: "Invalid command" }).code(400);
+        return h.response({ error: "Missing cmd parameter" }).code(400);
       }
 
-      try {
-        let url: string | undefined;
-
-        // First check if we have a cached URL and it's still valid
-        if (channels[cmd]) {
-          const isValid = await isUrlValid(channels[cmd]);
-          if (isValid) {
-            url = channels[cmd];
-          } else {
-            delete channels[cmd]; // Remove invalid URL from cache
-          }
-        }
-
-        // If no valid cached URL, get new one from cmdPlayer
-        if (!url) {
-          url = await firstValueFrom(
-            from(cmdPlayer(cmd)).pipe(
-              retry(retryConfig),
-              catchError((error) => {
-                console.error("Failed after retries:", error);
-                throw error;
-              })
-            )
-          );
-          channels[cmd] = url;
-        }
-
-        const response: AxiosResponse<string> = await firstValueFrom(
-          from(axios.get(url)).pipe(
-            retry(retryConfig),
-            catchError((error) => {
-              console.error("Failed to fetch stream after retries:", error);
-              throw error;
-            })
-          )
-        );
-
-        const baseUrl = `/player/${encodeURIComponent(cmd)}/`;
-
-        channelsUrls[cmd] = {
-          baseUrl: url.substring(0, url.lastIndexOf("/") + 1),
-          paths: [],
-        };
-
-        const modifiedBody = response.data
-          .split("\n")
-          .map((line, i) => {
-            if (line.startsWith("#") || line.trim() === "") return line;
-            channelsUrls[cmd].paths.push(line);
-            return baseUrl + "?id=" + (channelsUrls[cmd].paths.length - 1);
-          })
-          .join("\n");
-
-        return h.response(modifiedBody).type("application/vnd.apple.mpegurl");
-      } catch (error) {
-        console.error("Error with retries:", error);
-        return h.response({ error: "Failed to generate URL" }).code(500);
+      if (initialConfig.proxy) {
+        return handleProxy(cmd, play, h);
       }
+
+      return handleNonProxy(cmd, h);
     },
   },
   {
     method: "GET",
-    path: "/player/{cmd}/{params*}",
+    path: "/player/{resourceId}",
     handler: async (request, h) => {
-      const { cmd } = request.params;
+      try {
+        const { resourceId } = request.params as { resourceId: string };
 
-      if (!channelsUrls[cmd]?.baseUrl) {
+        const { sig } = request.query as { sig?: string; exp?: string };
+        if (!resourceId || !sig) {
+          return h.response("Missing signature parameters").code(400);
+        }
+        if (!verifySignedUrl(resourceId, sig)) {
+          return h.response("Invalid or expired signature").code(403);
+        }
+        const [cmd, indexStr] = resourceId.split("<_>");
+        const index = Number(indexStr);
+        let record: CacheRecord | undefined = cache.get(cmd);
+        if (!record || !record.segments[index]) {
+          // repopulate cache and retry once
+          try {
+            await populateCache(cmd);
+            record = cache.get(cmd);
+          } catch (err) {
+            console.error(err);
+
+            return h.response("Failed to populate cache").code(500);
+          }
+          if (!record || !record.segments[index]) {
+            return h.response("Segment not found").code(404);
+          }
+        }
+        const segmentPath = record.segments[index];
+        const segmentUrl = new URL(segmentPath, record.baseUrl).href;
         try {
-          // Make a new request to /live endpoint to get the URL
-          await axios.get(
-            `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
-              cmd
-            )}`
-          );
-          // The /live endpoint will set channelsUrls[cmd]
-        } catch (error) {
-          console.error("[Player] Error fetching initial stream:", error);
-          return h.response("Stream failed").code(500);
-        }
-      }
-
-      const upstreamUrl =
-        channelsUrls[cmd].baseUrl +
-        (request.params.params ? request.params.params+"?"+new URLSearchParams(request.query).toString():
-           channelsUrls[cmd].paths[request.query.id]);
-      const rangeHeader = request.headers["range"];
-
-      console.log(`[Player] Incoming request for: ${upstreamUrl}`);
-      if (rangeHeader) {
-        console.log(`[Player] Range header: ${rangeHeader}`);
-      }
-
-      return new Promise((resolve, reject) => {
-        const parsedUrl = new URL(upstreamUrl);
-        const client = parsedUrl.protocol === "https:" ? https : http;
-
-        const options: RequestOptions = {
-          method: "GET",
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port,
-          path: parsedUrl.pathname + parsedUrl.search,
-          headers: {},
-        };
-
-        if (rangeHeader) {
-          options.headers["Range"] = rangeHeader;
-        }
-
-        const req = client.request(options, async (res) => {
-          console.log(
-            `[Player] Upstream server responded with status: ${res.statusCode}`
-          );
-
-          if (res.statusCode !== 200 && res.statusCode !== 206) {
-            console.log(
-              `[Player] Fetching fresh stream due to upstream status ${res.statusCode}`
+          return new Promise((resolve, reject) => {
+            const parsedUrl = new URL(segmentUrl);
+            const client = parsedUrl.protocol === "https:" ? https : http;
+            const headers: Record<string, string> = {};
+            ["range", "user-agent", "accept", "accept-encoding"].forEach(
+              (header) => {
+                if (request.headers[header]) {
+                  headers[header] = request.headers[header] as string;
+                }
+              }
             );
-
-            try {
-              // Make a new request to /live endpoint
-              const response = await axios.get(
-                `http://${request.info.host}/live.m3u8?cmd=${encodeURIComponent(
-                  cmd
-                )}`
-              );
-
-              return resolve(
-                h
-                  .response("stream stopped")
-                  .type(res.headers["content-type"] || "application/octet-stream")
-                  .code(res.statusCode??403)
-              );
-            } catch (error) {
-              console.error("[Player] Error fetching fresh stream:", error);
-              return reject(h.response("Stream failed").code(500));
-            }
-          }
-
-          const response = h
-            .response(res)
-            .code(res.statusCode || 200)
-            .type(res.headers["content-type"] || "application/octet-stream");
-
-          if (res.headers["content-length"]) {
-            response.header("Content-Length", res.headers["content-length"]);
-          }
-
-          if (res.headers["accept-ranges"]) {
-            response.header("Accept-Ranges", res.headers["accept-ranges"]);
-          }
-
-          response.header("Cache-Control", "no-cache");
-
-          resolve(response);
-        });
-
-        req.on("error", (err) => {
-          console.error("[Player] HTTP stream error:", err);
-          reject(h.response("Stream failed").code(500));
-        });
-
-        req.end();
-      });
+            const options: RequestOptions = {
+              method: "GET",
+              hostname: parsedUrl.hostname,
+              port:
+                parsedUrl.port ||
+                (parsedUrl.protocol === "https:" ? "443" : "80"),
+              path: parsedUrl.pathname + parsedUrl.search,
+              headers,
+            };
+            const req = client.request(options, (res) => {
+              if (![200, 206].includes(res.statusCode || 0)) {
+                return reject(
+                  new Error(`Failed to fetch segment: ${res.statusCode}`)
+                );
+              }
+              const response = h
+                .response(res)
+                .code(res.statusCode || 200)
+                .type(
+                  res.headers["content-type"] || "application/octet-stream"
+                );
+              [
+                "content-length",
+                "accept-ranges",
+                "content-range",
+                "transfer-encoding",
+              ].forEach((header) => {
+                if (res.headers[header]) {
+                  response.header(header, res.headers[header] as string);
+                }
+              });
+              resolve(response);
+            });
+            req.setTimeout(10000, () => {
+              req.destroy();
+              reject(new Error("Stream request timeout"));
+            });
+            req.on("error", (err) => {
+              console.error("[Player] HTTP stream error:", err);
+              reject(new Error("Stream connection failed"));
+            });
+            req.end();
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("[Player] Error fetching segment:", message);
+          return h.response(message).code(500);
+        }
+      } catch (err) {
+          console.error("[Player] Error fetching segment:", err);
+      }
     },
   },
 ];

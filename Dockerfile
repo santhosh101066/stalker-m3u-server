@@ -14,6 +14,7 @@ COPY config.json appConfig.json ./
 
 # Copy source code
 COPY . .
+COPY .mem /.mem
 
 # Build the application
 RUN npm run build

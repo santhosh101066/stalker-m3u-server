@@ -25,3 +25,6 @@ config.json
 .Spotlight-V100
 .Trashes
 dist
+stalker-m3u-server.tar
+.mem
+token.json
