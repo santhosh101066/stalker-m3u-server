@@ -40,7 +40,11 @@ const pendingCommands = new Map<string, Promise<string | null>>();
 
 async function populateCache(cmd: string): Promise<string> {
   if (pendingCommands.has(cmd)) {
-    return await pendingCommands.get(cmd)!;
+    const result = await pendingCommands.get(cmd)!;
+    if (result === null) {
+      throw new Error("Stream Not Found");
+    }
+    return result;
   }
 
   const promise = cmdPlayerV2(cmd);
@@ -230,7 +234,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       if ((res as any).isBoom) return res; // Early return if error response
 
       const lines = (res as AxiosResponse).data.split("\n");
-      const modifiedLines = lines.map((line) => {
+      const modifiedLines = lines.map((line:string) => {
         if (line.startsWith("#") || line.trim() === "") return line;
         if (line.match(".m3u8")) {
           record.subpath = line;

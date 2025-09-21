@@ -38,8 +38,8 @@ function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
 
 export async function getPlaylistV2() {
   const genres = readJSON<Genre>("channel-groups.json");
-  const allPrograms = await stalkerApi.getChannels();
-  const m3u = (allPrograms.js.data ?? []).filter((channel) => {
+  const allPrograms = readJSON<Channel>("channels.json");
+  const m3u = (allPrograms?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
     return genre && initialConfig.groups.includes(genre.title);
   });

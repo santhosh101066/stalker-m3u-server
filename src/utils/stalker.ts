@@ -12,12 +12,8 @@ import {
 } from "@/types/types";
 import axios from "axios";
 import type { AxiosError, AxiosRequestConfig } from "axios";
-import { writeFile, readFileSync, existsSync, unlinkSync } from "fs";
+import { writeFile, readFileSync, existsSync, unlinkSync, promises as fsPromises } from "fs";
 import path from "path";
-import http from "http";
-import https from "https";
-import { URL } from "url";
-import * as zlib from "zlib";
 
 type RequestOptions = {
   method?: string;
@@ -34,87 +30,18 @@ async function httpRequest<T = any>(
     timeout?: number;
   } = { timeout: 10000 }
 ): Promise<T> {
-  const urlObj = new URL(url);
-
-  // add query params
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null) {
-      urlObj.searchParams.append(k, String(v));
-    }
-  }
-
-  const lib = urlObj.protocol === "https:" ? https : http;
-
-  return new Promise((resolve, reject) => {
-    const req = lib.request(
-      urlObj,
-      {
-        method: options.method || "GET",
-        headers: {
-          "Accept-Encoding": "gzip,deflate,br", // tell server we can handle compression
-          ...options.headers,
-        },
-        timeout: options.timeout || 10000,
-      },
-      (res) => {
-        let chunks: Buffer[] = [];
-
-        res.on("data", (chunk) => {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        });
-
-        res.on("end", () => {
-          try {
-            let buffer = Buffer.concat(chunks);
-            const encoding = res.headers["content-encoding"];
-            let decoded: Buffer;
-
-            // 🔹 Handle compressed responses
-            if (encoding === "gzip") {
-              decoded = zlib.gunzipSync(buffer);
-            } else if (encoding === "deflate") {
-              decoded = zlib.inflateSync(buffer);
-            } else if (encoding === "br") {
-              decoded = zlib.brotliDecompressSync(buffer);
-            } else {
-              decoded = buffer;
-            }
-
-            let text = decoded.toString("utf-8");
-
-            const contentType = res.headers["content-type"] || "";
-
-            if (contentType.includes("application/json")) {
-              resolve({ data: JSON.parse(text) } as T);
-            } else {
-              resolve({ data: text as any } as T);
-            }
-          } catch (err) {
-            reject(err);
-          }
-        });
-      }
-    );
-
-    req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy(new Error("Request timeout"));
-    });
-
-    req.end();
-  });
+  return axios
+    .request<T>({
+      url,
+      params,
+      method: options.method || "GET",
+      headers: options.headers,
+      timeout: options.timeout || 10000,
+      validateStatus: (status) => status === 200,
+    })
+    .then((res) => res.data);
 }
-  // console.log(options, url, params);
-
-  // return axios
-  //   .get<T>(url, {
-  //     params,
-  //     headers: options.headers,
-  //     timeout: options.timeout || 10000,
-  //     validateStatus: (status) => status === 200,
-  //   })
-  //   .then((res) => res.data);
-// }
+  
 
 export class StalkerAPI {
   private token: string = "";
@@ -143,11 +70,11 @@ export class StalkerAPI {
 
   async startWatchdog(interval: number = 30) {
     if (this.watchdogInterval) {
-      console.log("Watchdog already running");
+      
       return;
     }
     this.watchdogStarted = true;
-    console.log(`Starting watchdog every ${interval * 1000}ms...`);
+    
 
     const runWatchdogCheck = async (init = false) => {
       try {
@@ -157,7 +84,7 @@ export class StalkerAPI {
 
         const res = await axios.get(
           `${this.getBaseUrl()}${this.getPhpUrl()}`,
-          this.getAxiosConfig(
+          this._getAxiosRequestConfig(
             {
               type: "watchdog",
               action: "get_events",
@@ -166,11 +93,16 @@ export class StalkerAPI {
               event_active_id: "0",
               JsHttpRequest: "1-xml",
             },
-            this.__token.value!
+            this.__token.value!,
+            {
+              validateStatus: (status) => status === 200,
+              withCredentials: true,
+              contentType: "application/json",
+            }
           )
         );
 
-        console.log("Watchdog event:", res.data);
+        
 
         this.handleWatchdogEvents(res.data);
       } catch (err) {
@@ -189,7 +121,7 @@ export class StalkerAPI {
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval);
       this.watchdogInterval = null;
-      console.log("Watchdog stopped.");
+      
     }
   }
   private handleWatchdogEvents(data: any) {
@@ -197,7 +129,7 @@ export class StalkerAPI {
       return;
     }
 
-    console.log("Handling watchdog event:", data);
+    
 
     switch (data.event) {
       case "reboot":
@@ -207,10 +139,10 @@ export class StalkerAPI {
         console.warn("Watchdog event: reload portal.");
         break;
       case "send_msg":
-        console.log("Message from watchdog:", data.msg);
+        
         break;
       case "update_channels":
-        console.log("Watchdog: updating channels...");
+        
         break;
       case "update_epg":
         console.log("Watchdog: EPG update requested...");
@@ -220,32 +152,15 @@ export class StalkerAPI {
     }
   }
 
-  private getRequestConfig(params: Record<string, any>, token: string) {
-    return {
-      params: {
-        ...params,
-        mac: initialConfig.mac,
-        token,
-      },
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (STB) WebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36",
-        "X-User-Agent": `Model: ${initialConfig.stbType}; Link: WiFi`,
-        Cookie: `mac=${initialConfig.mac}; stb_lang=en; timezone=America/New_York`,
-        Authorization: `Bearer ${token}`,
-        SN: initialConfig.serialNumber!,
-        "Accept-Encoding": "gzip, deflate, br",
-        Accept: "*/*",
-        Connection: "keep-alive",
-        Referrer: this.getBaseUrl(),
-      },
-      timeout: 10000,
-    };
-  }
-
-  private getAxiosConfig(
+  private _getAxiosRequestConfig(
     params: Record<string, any>,
-    token: string
+    token: string,
+    options?: {
+      contentType?: string;
+      withCredentials?: boolean;
+      validateStatus?: (status: number) => boolean;
+      referrer?: string;
+    }
   ): AxiosRequestConfig {
     return {
       params: {
@@ -257,19 +172,18 @@ export class StalkerAPI {
         "User-Agent":
           "Mozilla/5.0 (STB) WebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36",
         "X-User-Agent": `Model: ${initialConfig.stbType}; Link: WiFi`,
-        // "X-User-Agent": "Model: MAG250; Link: WiFi",
-        // Referrer: this.getBaseUrl(),
         Cookie: `mac=${initialConfig.mac}; stb_lang=en; timezone=America/New_York`,
         Authorization: `Bearer ${token}`,
         SN: initialConfig.serialNumber!,
         "Accept-Encoding": "gzip, deflate, br",
         Accept: "*/*",
         Connection: "keep-alive",
-        "Content-Type": "application/json",
+        "Content-Type": options?.contentType || "application/json",
+        Referrer: options?.referrer || this.getBaseUrl(),
       },
       timeout: 10000,
-      validateStatus: (status) => status === 200,
-      withCredentials: true,
+      validateStatus: options?.validateStatus || ((status) => status === 200),
+      withCredentials: options?.withCredentials || true,
     };
   }
 
@@ -291,13 +205,25 @@ export class StalkerAPI {
         stb_type: initialConfig.stbType,
         JsHttpRequest: "1-xml",
       },
-      this.getRequestConfig({}, token)
+      (() => {
+        const config = this._getAxiosRequestConfig({}, token, { referrer: this.getBaseUrl() });
+        return {
+          method: config.method,
+          headers: config.headers as Record<string, string>,
+          timeout: config.timeout,
+        };
+      })()
     );
   }
 
   async getToken(refreshToken: boolean) {
     try {
-      this.__loadCache();
+      await this.__loadCache();
+
+      // Check if token exists and is not expired
+      if (this.__token.value && this.tokenExpiry && this.tokenExpiry.getTime() > Date.now() + 5 * 60 * 1000) { // 5 minutes buffer
+        return this.__token.value;
+      }
 
       if (this.__token.value && refreshToken) {
         await this.__refreshToken();
@@ -308,12 +234,11 @@ export class StalkerAPI {
         this.clearCache();
 
         const response: any = await this.performHandshake();
-        console.log(response);
         
-        if (response?.data?.js?.token) {
-          this.__token.value = response.data.js.token;
-          this.random = response.data.js.random;
-          this.tokenExpiry = new Date(Date.now() + 3600000);
+        if (response?.js?.token) {
+          this.__token.value = response.js.token;
+          this.random = response.js.random;
+          this.tokenExpiry = new Date(Date.now() + 3600000); // Token valid for 1 hour
           await this.__refreshToken();
           this.__saveCache();
           return this.__token.value;
@@ -333,7 +258,7 @@ export class StalkerAPI {
     this.__token.value = null;
     if (existsSync(this.__tokenPath)) {
       try {
-        unlinkSync(this.__tokenPath);
+        fsPromises.unlink(this.__tokenPath);
       } catch (err) {
         console.error("Failed to delete token cache file:", err);
       }
@@ -379,16 +304,20 @@ export class StalkerAPI {
           token: this.__token.value,
           JsHttpRequest: "1-xml",
         },
-        this.getRequestConfig(
-          {},
-          this.__token.value
-        )
+        (() => {
+          const config = this._getAxiosRequestConfig({}, this.__token.value!, { referrer: this.getBaseUrl() });
+          return {
+            method: config.method,
+            headers: config.headers as Record<string, string>,
+            timeout: config.timeout,
+          };
+        })()
       );
-      console.log("Expires on : ", profile.data?.js?.expire_billing_date);
-      if (profile.data !== "Authorization failed.") {
-        // this.startWatchdog(profile.data.js.watchdog_timeout);
+      console.log("Expires on : ", profile.js?.expire_billing_date);
+      if (profile !== "Authorization failed.") {
+        // this.startWatchdog(profile.js.watchdog_timeout);
       }
-      if (profile.data?.js?.status === 2 && secondAuth == 0) {
+      if (profile.js?.status === 2 && secondAuth == 0) {
         await this.__refreshToken(1);
       }
       // await axios.get(
@@ -411,10 +340,10 @@ export class StalkerAPI {
     }
   }
 
-  private __loadCache() {
+  private async __loadCache() {
     if (existsSync(this.__tokenPath)) {
       try {
-        const data = readFileSync(this.__tokenPath, "utf-8");
+        const data = await fsPromises.readFile(this.__tokenPath, "utf-8");
         const json = JSON.parse(data);
         if (json.token) {
           this.__token.value = json.token;
@@ -425,16 +354,11 @@ export class StalkerAPI {
     }
   }
 
-  private __saveCache() {
+  private async __saveCache() {
     try {
-      writeFile(
+      await fsPromises.writeFile(
         this.__tokenPath,
-        JSON.stringify({ token: this.__token.value }, null, 2),
-        (err) => {
-          if (err) {
-            console.error("Failed to save token cache:", err);
-          }
-        }
+        JSON.stringify({ token: this.__token.value }, null, 2)
       );
     } catch (err) {
       console.error("Failed to save token cache:", err);
@@ -456,19 +380,23 @@ export class StalkerAPI {
     try {
       const response = await httpRequest(
         url, { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
-        this.getRequestConfig(
-          {},
-          this.__token.value ?? ""
-        )
+        (() => {
+          const config = this._getAxiosRequestConfig({}, this.__token.value ?? "", { referrer: this.getBaseUrl() });
+          return {
+            method: config.method,
+            headers: config.headers as Record<string, string>,
+            timeout: config.timeout,
+          };
+        })()
       );
 
       if (
-        typeof response.data === "string" &&
-        response.data.startsWith("Authorization failed.") &&
+        typeof response === "string" &&
+        response.startsWith("Authorization failed.") &&
         !loop &&
         !this.isProfileFetching
       ) {
-        console.log(response.data, " - Fetching new token and retrying...");
+        console.log(response, " - Fetching new token and retrying...");
 
         this.__token.value = await this.getToken(true);
         // if (!isFetch) {
@@ -479,12 +407,11 @@ export class StalkerAPI {
         // }
         return this.makeRequest(endpoint, params, isFetch, true);
       }
-      if (response.data === "Authorization failed.") {
+      if (response === "Authorization failed.") {
         throw new Error("Authorization Failed.");
       }
-      console.log(response.data);
       
-      return response.data;
+      return response;
     } catch (error: any) {
       if (axios.isAxiosError(error) && error.response?.status === 401) {
         this.__token.value = null;
@@ -551,7 +478,6 @@ export class StalkerAPI {
         episode_id: episodeId,
         search,
       }
-      console.log(params);
       
     return this.makeRequest<Data<Programs<Video>>>(
       this.getPhpUrl(),
@@ -570,19 +496,6 @@ export class StalkerAPI {
     search = "",
     ...others
   }: MoviesApiParams) {
-    console.log({
-      type: "series",
-      action: "get_ordered_list",
-      category,
-      genre: "*",
-      p: page,
-      sortby: "added",
-      movie_id: movieId,
-      season_id: seasonId,
-      episode_id: episodeId,
-      search,
-      ...others
-    });
 
     return this.makeRequest<Data<Programs<Video>>>(
       this.getPhpUrl(),
@@ -624,7 +537,6 @@ export class StalkerAPI {
       series: Number(series),
       cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
     }
-    console.log(params);
 
     return this.makeRequest<Data<Programs<Video>>>("/server/load.php", params);
   }
@@ -669,10 +581,8 @@ export class StalkerAPI {
     if (!initialConfig.tokens.includes(token)) {
       initialConfig.tokens.push(token);
       const configPath = path.join(process.cwd(), "config.json");
-      writeFile(configPath, JSON.stringify(initialConfig, null, 2), (err) => {
-        if (err) {
-          console.error("Failed to save config:", err);
-        }
+      fsPromises.writeFile(configPath, JSON.stringify(initialConfig, null, 2)).catch((err) => {
+        console.error("Failed to save config:", err);
       });
     }
   }
@@ -681,7 +591,7 @@ export class StalkerAPI {
     if (initialConfig.tokens.includes(token)) {
       initialConfig.tokens = initialConfig.tokens.filter((t) => t !== token);
       const configPath = path.join(process.cwd(), "config.json");
-      writeFile(configPath, JSON.stringify(initialConfig, null, 2), (err) => {
+      fsPromises.writeFile(configPath, JSON.stringify(initialConfig, null, 2)).catch((err) => {
         if (err) {
           console.error("Failed to save config:", err);
         }
