@@ -1,9 +1,4 @@
-import { cmdPlayer } from "@/utils/cmdPlayer";
-import axios, { all, AxiosError, AxiosResponse } from "axios";
 import {
-  Request,
-  ResponseToolkit,
-  ResponseObject,
   ServerRoute,
 } from "@hapi/hapi";
 import { readJSON, writeJSON } from "@/utils/storage";
@@ -13,10 +8,12 @@ import { stalkerApi } from "@/utils/stalker";
 export const stalkerV2: ServerRoute[] = [
   {
     method: "GET",
-    path: "/api/v2/get-token",
+    path: "/api/images/{slug*}",
     handler: async (request, h) => {
-      const token = await stalkerApi.fetchNewToken();
-      return token;
+      const slug: string = request.params.slug;
+      return h.redirect(
+        `http://${initialConfig.hostname}:${initialConfig.port}/${slug}`
+      );
     },
   },
   {
@@ -50,7 +47,7 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       const channels = await stalkerApi.getChannels();
       const filteredChannels = channels.js.data.filter(
-        (channel) => channel.censored != "1"
+        (channel) => String(channel.censored) !== "1"
       );
       writeJSON("channels.json", filteredChannels);
       return filteredChannels;

@@ -1,4 +1,4 @@
-import { Config } from "@/types/types";
+import { AppConfig, Config } from "@/types/types";
 import fs from "fs";
 
 export const serverConfig = {
@@ -20,7 +20,24 @@ const ConfigDefault: Config = {
   tokens: []
 };
 
+const AppConfigDefault: AppConfig = {
+  api: {
+    timeout: 5000,
+    retries: 3
+  },
+  app: {
+    name: "stalker-m3u-server",
+    environment: "production",
+    logLevel: "info"
+  },
+  proxy: {
+    secretKey: "default-secret-key-please-change"
+  }
+};
+
 export let initialConfig: Config = ConfigDefault;
+export let appConfig: AppConfig = AppConfigDefault;
+
 export function getInitialConfig() {
   try {
     if (fs.existsSync("./config.json")) {
@@ -33,4 +50,17 @@ export function getInitialConfig() {
   return initialConfig;
 }
 
+export function getAppConfig() {
+  try {
+    if (fs.existsSync("./appConfig.json")) {
+      appConfig = JSON.parse(fs.readFileSync("./appConfig.json", "utf-8"));
+    }
+  } catch (err) {
+    console.warn("⚠️ Failed to load appConfig.json. Using default config.");
+    appConfig = AppConfigDefault;
+  }
+  return appConfig;
+}
+
 initialConfig = getInitialConfig();
+appConfig = getAppConfig();

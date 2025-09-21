@@ -18,7 +18,6 @@ import http from "http";
 import https from "https";
 import { URL } from "url";
 import * as zlib from "zlib";
-import { map } from "rxjs";
 
 type RequestOptions = {
   method?: string;
@@ -407,7 +406,7 @@ export class StalkerAPI {
       //   )
       // );
     } catch (error) {
-      console.error("__refreshToken error:", error.message || error);
+      console.error("__refreshToken error:", (error as AxiosError).message || error);
       throw error;
     }
   }

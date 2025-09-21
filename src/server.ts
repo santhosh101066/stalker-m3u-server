@@ -1,12 +1,10 @@
 import { initialConfig, serverConfig } from "@/config/server";
-import { generateGroupRoutes } from "@/routes/generate";
 import { playlistRoutes } from "./routes/playlist";
 import { liveRoutes } from "./routes/live";
 import { configRoutes } from "./routes/config";
 import Hapi from "@hapi/hapi";
 import Inert from "@hapi/inert";
 import { serverManager } from "./serverManager";
-import { moviesRoute } from "./routes/media";
 import { stalkerV2 } from "./routes/stalkerV2";
 import path from "path";
 import { proxy } from "./routes/proxy";
@@ -21,11 +19,9 @@ const init = async () => {
 
   serverManager.setServer(server);
   await server.register(Inert);
-  server.route(generateGroupRoutes);
   server.route(playlistRoutes);
   server.route(liveRoutes);
   server.route(configRoutes);
-  server.route(moviesRoute);
   server.route(stalkerV2);
   server.route(proxy);
   server.route(portalProxy);

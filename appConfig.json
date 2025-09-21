@@ -5,6 +5,10 @@
   },
   "app": {
     "name": "stalker-m3u-server",
-    "environment": "production"
+    "environment": "production",
+    "logLevel": "info"
+  },
+  "proxy": {
+    "secretKey": "default-secret-key-please-change"
   }
 }

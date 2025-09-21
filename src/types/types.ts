@@ -27,6 +27,21 @@ export interface Config extends BaseConfig {
 }
 
 export type VodOrdering = "none" | "rating" | "alphabetic";
+
+export interface AppConfig {
+  api: {
+    timeout: number;
+    retries: number;
+  };
+  app: {
+    name: string;
+    environment: string;
+    logLevel: string;
+  };
+  proxy: {
+    secretKey: string;
+  };
+}
 export type StreamTester = "http" | "ffmpeg";
 
 export type GenerationKind = "iptv" | "vod" | "series";

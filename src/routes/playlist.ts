@@ -1,11 +1,7 @@
 import { Channel } from "@/types/types";
-import { generateFilteredGroup, generateGroup } from "@/utils/generateGroups";
 import {
-  getEPG,
   getEPGV2,
-  getM3u,
   getM3uV2,
-  getPlaylist,
   getPlaylistV2,
 } from "@/utils/getM3uUrls";
 import { ServerRoute } from "@hapi/hapi";
@@ -43,14 +39,6 @@ export const playlistRoutes: ServerRoute[] = [
         .response(epg)
         .type("application/xml")
         .header("Content-Disposition", 'inline; filename="epg.xml"');
-    },
-  },
-  {
-    method: "GET",
-    path: "/api/channels-group",
-    handler: async (request, h) => {
-      const groups = await generateFilteredGroup();
-      return groups;
     },
   },
 ];

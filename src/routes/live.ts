@@ -4,21 +4,11 @@ import { ServerRoute } from "@hapi/hapi";
 import http from "http";
 import https, { RequestOptions } from "https";
 import NodeCache from "node-cache";
-import { initialConfig } from "@/config/server";
+import { appConfig, initialConfig } from "@/config/server";
 
-const SECRET_KEY = "your-secret-key";
+const SECRET_KEY = appConfig.proxy.secretKey;
 
-function assertHttpUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (!["http:", "https:"].includes(url.protocol)) {
-      throw new Error("Invalid URL protocol");
-    }
-    return url.href;
-  } catch {
-    throw new Error("Invalid URL");
-  }
-}
+
 
 function generateSignedUrl(resourceId: string): string {
   const sig = require("crypto")
@@ -46,13 +36,10 @@ const cache = new NodeCache({ stdTTL: 600, checkperiod: 60 });
 
 const pendingCommands = new Map<string, Promise<string | null>>();
 
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+
 
 async function populateCache(cmd: string): Promise<string> {
   if (pendingCommands.has(cmd)) {
-    console.log(`Waiting for existing cmdPlayerV2 call for ${cmd}`);
     return await pendingCommands.get(cmd)!;
   }
 
@@ -63,15 +50,11 @@ async function populateCache(cmd: string): Promise<string> {
     pendingCommands.delete(cmd);
   });
 
-  console.log(cmd, "Populating cache for command");
-
   if (!masterUrl) {
     throw new Error("Stream Not Found");
   }
-  console.log("got URL master URL");
 
   const res = await axios.get(masterUrl);
-  console.log("Playlist fetch response: cache", res.status);
 
   const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
 
@@ -96,6 +79,180 @@ async function populateCache(cmd: string): Promise<string> {
   return modifiedLines.join("\n");
 }
 
+async function handleNonProxy(cmd: string, h: any) {
+  try {
+    // First try the "redirected" URL
+    const redirectedUrl = await cmdPlayerV2(cmd);
+    if (redirectedUrl) {
+      const res = await axios.get(redirectedUrl, {
+        validateStatus: () => true,
+      });
+
+      // If redirected works → return
+      if (res.status >= 200 && res.status < 300 && res.data) {
+        return h
+          .response(res.data)
+          .type("application/vnd.apple.mpegurl")
+          .code(200);
+      }
+
+      console.warn(
+        `[Non-Proxy] Redirected URL failed with status ${res.status}, falling back...`
+      );
+    }
+
+    // Fallback to the original localhost stream
+    const fallbackUrl = `http://localhost/ch/${encodeURIComponent(cmd)}`;
+    const res2 = await axios.get(fallbackUrl, {
+      validateStatus: () => true,
+    });
+
+    if (res2.status >= 200 && res2.status < 300 && res2.data) {
+      return h
+        .response(res2.data)
+        .type("application/vnd.apple.mpegurl")
+        .code(200);
+    }
+
+    return h
+      .response({ error: `Both redirect and fallback failed (${res2.status})` })
+      .code(res2.status);
+  } catch (err) {
+    console.error("Non-proxy error:", err);
+    return h.response({ error: "Stream fetch failed" }).code(500);
+  }
+}
+
+async function handleProxy(cmd: string, play: string | undefined, h: any) {
+  try {
+    if (!cache.get(cmd)) {
+      await populateCache(cmd);
+    }
+    const record: CacheRecord | undefined = cache.get(cmd);
+    if (!record) {
+      return h.response("Stream Not Found").code(404);
+    }
+
+    const fetchPlaylist = async (url: string, isSubpath: boolean = false) => {
+      const res = await axios.get(url, { validateStatus: () => true });
+
+      if (!isSubpath && [301, 302, 403].includes(res.status)) {
+        // Refresh master URL and retry
+        const newMasterUrl = await cmdPlayerV2(cmd);
+        if (newMasterUrl) {
+          // Update cache baseUrl so future segments work
+          const newBaseUrl = newMasterUrl.substring(
+            0,
+            newMasterUrl.lastIndexOf("/") + 1
+          );
+          if (record) {
+            record.baseUrl = newBaseUrl;
+            cache.set(cmd, record as CacheRecord);
+          }
+
+          // Retry playlist fetch with updated URL
+          const refreshed = await axios.get(newMasterUrl, {
+            validateStatus: () => true,
+          });
+          return refreshed;
+        }
+      }
+      if (res.status < 200 || res.status >= 300 || !res.data) {
+        return h
+          .response({ error: `Upstream Error ${res.status}` })
+          .code(res.status);
+      }
+      return res;
+    };
+    if (play === "1" && record.subpath) {
+      // Fetch sub-playlist
+
+      const subUrl = new URL(record.subpath, record.baseUrl).href;
+
+      let res = await fetchPlaylist(subUrl, true);
+      if ((res as any).isBoom) return res; // Early return if error response;
+      if (!res.data) {
+        const newMasterUrl = await cmdPlayerV2(cmd);
+        if (!newMasterUrl) {
+          return h.response({ error: "Stream Not Found" }).code(404);
+        }
+        const newBaseUrl = newMasterUrl.substring(
+          0,
+          newMasterUrl.lastIndexOf("/") + 1
+        );
+        const refreshedRes = await axios.get(newMasterUrl, {
+          validateStatus: () => true,
+        });
+        if (
+          refreshedRes.status < 200 ||
+          refreshedRes.status >= 300 ||
+          !refreshedRes.data
+        ) {
+          return h
+            .response({ error: `Upstream Error ${refreshedRes.status}` })
+            .code(refreshedRes.status);
+        }
+        record.baseUrl = newBaseUrl;
+        record.subpath = (refreshedRes as AxiosResponse).data
+          .split("\n")
+          .find((line: string) => line.match(".m3u8"));
+
+        cache.set(cmd, record as CacheRecord);
+        if (!record.subpath) {
+          return h
+            .response({ error: "No valid subpath found in new master URL" })
+            .code(404);
+        }
+        const subUrl = new URL(record.subpath, record.baseUrl).href;
+        res = await fetchPlaylist(subUrl, true);
+      }
+
+      const lines = (res as AxiosResponse).data.split("\n");
+      const modifiedLines = lines.map((line: string) => {
+        if (line.startsWith("#") || line.trim() === "") return line;
+        // Do not rewrite .m3u8 lines in subpath playlists
+        if (line.match(".m3u8")) {
+          return line;
+        }
+        const resourceId = `${cmd}<_>${record.segments.length}`;
+        record.segments.push(line);
+        cache.set(cmd, record as CacheRecord);
+        return generateSignedUrl(resourceId);
+      });
+
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
+    } else {
+      // Fetch master playlist
+      const masterUrl = await cmdPlayerV2(cmd);
+      const res = await fetchPlaylist(masterUrl);
+      if ((res as any).isBoom) return res; // Early return if error response
+
+      const lines = (res as AxiosResponse).data.split("\n");
+      const modifiedLines = lines.map((line) => {
+        if (line.startsWith("#") || line.trim() === "") return line;
+        if (line.match(".m3u8")) {
+          record.subpath = line;
+          cache.set(cmd, record as CacheRecord);
+          return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1`;
+        }
+        const resourceId = `${cmd}<_>${record.segments.length}`;
+        record.segments.push(line);
+        cache.set(cmd, record as CacheRecord);
+        return generateSignedUrl(resourceId);
+      });
+
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
+    }
+  } catch (error) {
+    console.error("Error:", (error as Error)?.stack ?? error);
+    return h.response({ error: "Failed to generate URL" }).code(500);
+  }
+}
+
 export const liveRoutes: ServerRoute[] = [
   {
     method: "GET",
@@ -108,192 +265,12 @@ export const liveRoutes: ServerRoute[] = [
       if (!cmd) {
         return h.response({ error: "Missing cmd parameter" }).code(400);
       }
-      if (!initialConfig.proxy) {
-        try {
-          // First try the "redirected" URL
-          const redirectedUrl = await cmdPlayerV2(cmd);
-          if (redirectedUrl) {
-            const res = await axios.get(redirectedUrl, {
-              validateStatus: () => true,
-            });
 
-            // If redirected works → return
-            if (res.status >= 200 && res.status < 300 && res.data) {
-              return h
-                .response(res.data)
-                .type("application/vnd.apple.mpegurl")
-                .code(200);
-            }
-
-            console.warn(
-              `[Non-Proxy] Redirected URL failed with status ${res.status}, falling back...`
-            );
-          }
-
-          // Fallback to the original localhost stream
-          const fallbackUrl = `http://localhost/ch/${encodeURIComponent(cmd)}`;
-          const res2 = await axios.get(fallbackUrl, {
-            validateStatus: () => true,
-          });
-
-          if (res2.status >= 200 && res2.status < 300 && res2.data) {
-            return h
-              .response(res2.data)
-              .type("application/vnd.apple.mpegurl")
-              .code(200);
-          }
-
-          return h
-            .response({
-              error: `Both redirect and fallback failed (${res2.status})`,
-            })
-            .code(res2.status);
-        } catch (err) {
-          console.error("Non-proxy error:", err);
-          return h.response({ error: "Stream fetch failed" }).code(500);
-        }
+      if (initialConfig.proxy) {
+        return handleProxy(cmd, play, h);
       }
 
-      try {
-        if (!cache.get(cmd)) {
-          await populateCache(cmd);
-        }
-        const record: CacheRecord | undefined = cache.get(cmd);
-        if (!record) {
-          return h.response("Stream Not Found").code(404);
-        }
-
-        const fetchPlaylist = async (
-          url: string,
-          isSubpath: boolean = false
-        ) => {
-          const res = await axios.get(url, { validateStatus: () => true });
-
-          console.log("Playlist fetch response:", res.status);
-          if (!isSubpath && [301, 302, 403].includes(res.status)) {
-            // Refresh master URL and retry
-            console.log("Fetching New Link");
-
-            const newMasterUrl = await cmdPlayerV2(cmd);
-            if (newMasterUrl) {
-              console.log(`[M3U8] Redirect to: ${newMasterUrl}`);
-
-              // Update cache baseUrl so future segments work
-              const newBaseUrl = newMasterUrl.substring(
-                0,
-                newMasterUrl.lastIndexOf("/") + 1
-              );
-              if (record) {
-                record.baseUrl = newBaseUrl;
-                cache.set(cmd, record as CacheRecord);
-              }
-
-              // Retry playlist fetch with updated URL
-              const refreshed = await axios.get(newMasterUrl, {
-                validateStatus: () => true,
-              });
-              return refreshed;
-            }
-          }
-          if (res.status < 200 || res.status >= 300 || !res.data) {
-            return h
-              .response({ error: `Upstream Error ${res.status}` })
-              .code(res.status);
-          }
-          return res;
-        };
-        console.log(play, record.subpath);
-        if (play === "1" && record.subpath) {
-          // Fetch sub-playlist
-
-          const subUrl = new URL(record.subpath, record.baseUrl).href;
-          console.log(`[M3U8] Fetching subpath: ${subUrl}`);
-
-          let res = await fetchPlaylist(subUrl, true);
-          if ((res as any).isBoom) return res; // Early return if error response;
-          if (!res.data) {
-            console.log("[M3U8] Subpath empty, redirecting to new /live.m3u8");
-            const newMasterUrl = await cmdPlayerV2(cmd);
-            if (!newMasterUrl) {
-              return h.response({ error: "Stream Not Found" }).code(404);
-            }
-            const newBaseUrl = newMasterUrl.substring(
-              0,
-              newMasterUrl.lastIndexOf("/") + 1
-            );
-            const refreshedRes = await axios.get(newMasterUrl, {
-              validateStatus: () => true,
-            });
-            if (
-              refreshedRes.status < 200 ||
-              refreshedRes.status >= 300 ||
-              !refreshedRes.data
-            ) {
-              return h
-                .response({ error: `Upstream Error ${refreshedRes.status}` })
-                .code(refreshedRes.status);
-            }
-            record.baseUrl = newBaseUrl;
-            record.subpath = (refreshedRes as AxiosResponse).data
-              .split("\n")
-              .find((line: string) => line.match(".m3u8"));
-
-            cache.set(cmd, record as CacheRecord);
-            if (!record.subpath) {
-              return h
-                .response({ error: "No valid subpath found in new master URL" })
-                .code(404);
-            }
-            const subUrl = new URL(record.subpath, record.baseUrl).href;
-            res = await fetchPlaylist(subUrl, true);
-          }
-
-          const lines = (res as AxiosResponse).data.split("\n");
-          const modifiedLines = lines.map((line: string) => {
-            if (line.startsWith("#") || line.trim() === "") return line;
-            // Do not rewrite .m3u8 lines in subpath playlists
-            if (line.match(".m3u8")) {
-              return line;
-            }
-            const resourceId = `${cmd}<_>${record.segments.length}`;
-            record.segments.push(line);
-            cache.set(cmd, record as CacheRecord);
-            return generateSignedUrl(resourceId);
-          });
-
-          return h
-            .response(modifiedLines.join("\n"))
-            .type("application/vnd.apple.mpegurl");
-        } else {
-          // Fetch master playlist
-          const masterUrl = await cmdPlayerV2(cmd);
-          console.log(`[M3U8] Redirect to: ${masterUrl}`);
-          const res = await fetchPlaylist(masterUrl);
-          if ((res as any).isBoom) return res; // Early return if error response
-
-          const lines = (res as AxiosResponse).data.split("\n");
-          const modifiedLines = lines.map((line) => {
-            if (line.startsWith("#") || line.trim() === "") return line;
-            if (line.match(".m3u8")) {
-              record.subpath = line;
-              cache.set(cmd, record as CacheRecord);
-              return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1`;
-            }
-            const resourceId = `${cmd}<_>${record.segments.length}`;
-            record.segments.push(line);
-            cache.set(cmd, record as CacheRecord);
-            console.log("SUBPATH LAST", record);
-            return generateSignedUrl(resourceId);
-          });
-
-          return h
-            .response(modifiedLines.join("\n"))
-            .type("application/vnd.apple.mpegurl");
-        }
-      } catch (error) {
-        console.log("Error:", (error as Error)?.stack ?? error);
-        return h.response({ error: "Failed to generate URL" }).code(500);
-      }
+      return handleNonProxy(cmd, h);
     },
   },
   {
@@ -302,7 +279,6 @@ export const liveRoutes: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const { resourceId } = request.params as { resourceId: string };
-        console.log(`Fetching resource: ${resourceId}`);
 
         const { sig } = request.query as { sig?: string; exp?: string };
         if (!resourceId || !sig) {
@@ -320,7 +296,7 @@ export const liveRoutes: ServerRoute[] = [
             await populateCache(cmd);
             record = cache.get(cmd);
           } catch (err) {
-            console.log(err);
+            console.error(err);
 
             return h.response("Failed to populate cache").code(500);
           }
