@@ -52,6 +52,8 @@ export class StalkerAPI {
   private signature: string = "";
   private not_valid_token: number = 0;
 
+  private profileRefreshPromise: Promise<string | null> | null = null;
+
   private __token: { value: string | null } = { value: null };
   private __tokenPath: string = path.join(process.cwd(), "token.json");
   private watchdogInterval: NodeJS.Timeout | null = null;
@@ -223,35 +225,63 @@ export class StalkerAPI {
       await this.__loadCache();
 
       // Check if token exists and is not expired
-      if (this.__token.value && this.tokenExpiry && this.tokenExpiry.getTime() > Date.now() + 5 * 60 * 1000) { // 5 minutes buffer
+      if (!refreshToken && this.__token.value && this.tokenExpiry && this.tokenExpiry.getTime() > Date.now() + 5 * 60 * 1000) { // 5 minutes buffer
         return this.__token.value;
       }
 
-      if (this.__token.value && refreshToken) {
-        await this.__refreshToken();
-        return this.__token.value;
+      // If a refresh is already in progress, wait for it instead of starting a new one
+      if (this.profileRefreshPromise) {
+        console.log("Waiting for in-progress token refresh...");
+        return this.profileRefreshPromise;
       }
 
-      if (!this.__token.value) {
-        this.clearCache();
+      // Start a new refresh and store the promise
+      this.profileRefreshPromise = (async () => {
+        try {
+          // If we have a token, try to refresh it (this is the `refreshToken=true` path)
+          if (this.__token.value) {
+            try {
+              await this.__refreshToken();
+              // If __refreshToken succeeds, the token is still valid
+              return this.__token.value;
+            } catch (refreshError) {
+              console.warn("Token refresh failed, forcing full re-handshake.", (refreshError as Error).message);
+              // Refresh failed, so the token is bad. Clear it.
+              this.clearCache();
+              // Fall-through to the handshake logic
+            }
+          }
 
-        const response: any = await this.performHandshake();
+          // If we're here, we need a full handshake (either no token, or refresh failed)
+          this.clearCache();
+          const response: any = await this.performHandshake();
 
-        if (response?.js?.token) {
-          this.__token.value = response.js.token;
-          this.random = response.js.random;
-          this.tokenExpiry = new Date(Date.now() + 3600000); // Token valid for 1 hour
-          await this.__refreshToken();
-          this.__saveCache();
-          return this.__token.value;
-        } else {
-          throw new Error("Authentication failed - Invalid response structure");
+          if (response?.js?.token) {
+            this.__token.value = response.js.token;
+            this.random = response.js.random;
+            this.tokenExpiry = new Date(Date.now() + 3600000); // Token valid for 1 hour
+            await this.__refreshToken(); // Get profile after handshake
+            this.__saveCache();
+            return this.__token.value;
+          } else {
+            throw new Error("Authentication failed - Invalid handshake response");
+          }
+        } catch (err) {
+          console.error("getToken inner promise error:", err);
+          this.clearCache(); // Ensure we are clean on failure
+          throw err; // Re-throw to fail the promise
+        } finally {
+          // Once the promise is settled (success or fail), clear it
+          // so the next call can start a new one.
+          this.profileRefreshPromise = null;
         }
-      }
+      })();
 
-      return this.__token.value;
+      return this.profileRefreshPromise;
+
     } catch (error) {
-      console.error("getToken error:", error);
+      console.error("getToken outer error:", error);
+      this.profileRefreshPromise = null; // Clear on outer error too
       throw error;
     }
   }
@@ -266,7 +296,6 @@ export class StalkerAPI {
       }
     }
   }
-
   private async __refreshToken(secondAuth = 0) {
     if (!this.__token.value) {
       throw new Error("No token to refresh");
@@ -315,31 +344,30 @@ export class StalkerAPI {
           };
         })()
       );
-      console.log("Expires on : ", profile.js?.expire_billing_date);
-      if (profile !== "Authorization failed.") {
-        // this.startWatchdog(profile.js.watchdog_timeout);
+
+      // --- ADD THIS CHECK ---
+      // If profile is not an object or .js is missing, the auth failed.
+      if (typeof profile !== 'object' || !profile.js) {
+        throw new Error("Profile refresh failed, invalid response. Likely auth failure.");
       }
-      if (profile.js?.status === 2 && secondAuth == 0) {
+      // --- END OF CHECK ---
+
+      console.log("Expires on : ", profile.js.expire_billing_date); // Now safe to access
+
+      // if (profile !== "Authorization failed.") { // This check is no longer needed
+      //   // this.startWatchdog(profile.js.watchdog_timeout);
+      // }
+
+      if (profile.js.status === 2 && secondAuth == 0) {
         await this.__refreshToken(1);
+      } else {
+        // Only run watchdog if we are not recursing
+        await this.runWatchdogCheck(true);
       }
-      await this.runWatchdogCheck(true)
-      // await axios.get(
-      //   `${BASE_URL}/server/load.php`,
-      //   this.getAxiosConfig(
-      //     {
-      //       type: "watchdog",
-      //       action: "get_events",
-      //       init: "0",
-      //       cur_play_type: "1",
-      //       event_active_id: "0",
-      //       JsHttpRequest: "1-xml",
-      //     },
-      //     this.__token.value
-      //   )
-      // );
+
     } catch (error) {
       console.error("__refreshToken error:", (error as AxiosError).message || error);
-      throw error;
+      throw error; // Re-throw the error so getToken can catch it
     }
   }
 

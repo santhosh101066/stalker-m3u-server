@@ -1,0 +1,41 @@
+<svg width="100%" height="100%" viewBox="0 0 420 90" xmlns="http://www.w3.org/2000/svg">
+    <!-- Gradient Definition -->
+    <defs>
+        <linearGradient id="logoGradient" x1="0%" y1="50%" x2="100%" y2="50%">
+            <stop offset="0%" style="stop-color:#00C6FF;" />
+            <stop offset="100%" style="stop-color:#0072FF;" />
+        </linearGradient>
+    </defs>
+
+    <!-- Icon Group: Re-drawn for accuracy -->
+    <g id="icon" fill="url(#logoGradient)">
+        <!-- Main Icon Shape, redrawn to match the reference image's geometry -->
+        <path d="M20 10 L 85 45 L 20 80 L 40 65 L 40 25 Z" />
+
+        <!-- Stylized "stalker" lines, redrawn as sharp, thin polygons -->
+        <g>
+            <path d="M90 32 L 105 45 L 90 58 L 94 45 Z" opacity="0.9" />
+            <path d="M108 32 L 123 45 L 108 58 L 112 45 Z" opacity="0.7" />
+        </g>
+    </g>
+
+    <!-- Text Group: Re-aligned and re-sized -->
+    <g id="text-group" transform="translate(145, 0)">
+        <!-- "STALKER" Text -->
+        <text
+            x="0"
+            y="42"
+            fill="url(#logoGradient)"
+            style="font-family: 'Montserrat', sans-serif; font-size: 38px; font-weight: 800; text-transform: uppercase; letter-spacing: 0px; dominant-baseline: middle;">
+            STALKER
+        </text>
+        <!-- "VOD PLAYER" Text -->
+        <text
+            x="0"
+            y="68"
+            fill="url(#logoGradient)"
+            style="font-family: 'Montserrat', sans-serif; font-size: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; dominant-baseline: middle; opacity: 0.9;">
+            VOD PLAYER
+        </text>
+    </g>
+</svg>
