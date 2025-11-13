@@ -3,7 +3,7 @@ import axios from "axios";
 import http from "http";
 import https, { RequestOptions } from "https";
 
-// ==== Config ====
+// ==== Config ==== 
 
 
 // Optional: restrict to http/https only
@@ -27,7 +27,7 @@ export function getProxiedUrl(url: string, referer?: string): string {
 
 
 
-// ==== Hapi routes ====
+// ==== Hapi routes ==== 
 export const proxy: ServerRoute[] = [
   {
     method: 'GET',
@@ -42,11 +42,17 @@ export const proxy: ServerRoute[] = [
         const decodedUrl = Buffer.from(url, 'base64').toString('utf-8');
         const referer = ref ? Buffer.from(ref, 'base64').toString('utf-8') : undefined;
 
+        const requestHeaders: Record<string, string | undefined> = {
+          Referer: referer,
+        };
+        if (request.headers.range) {
+          requestHeaders['Range'] = request.headers.range;
+        }
+
         const response = await axios.get(decodedUrl, {
           responseType: 'stream',
-          headers: {
-            Referer: referer,
-          },
+          headers: requestHeaders,
+          validateStatus: () => true,
         });
 
         const stream = response.data as http.IncomingMessage;

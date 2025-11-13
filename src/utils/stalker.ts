@@ -28,7 +28,7 @@ async function httpRequest<T = any>(
     method?: string;
     headers?: Record<string, string>;
     timeout?: number;
-  } = { timeout: 10000 }
+  } = { timeout: 20000 }
 ): Promise<T> {
   return axios
     .request<T>({
@@ -36,12 +36,12 @@ async function httpRequest<T = any>(
       params,
       method: options.method || "GET",
       headers: options.headers,
-      timeout: options.timeout || 10000,
+      timeout: 30000,
       validateStatus: (status) => status === 200,
     })
     .then((res) => res.data);
 }
-  
+
 
 export class StalkerAPI {
   private token: string = "";
@@ -70,58 +70,60 @@ export class StalkerAPI {
 
   async startWatchdog(interval: number = 30) {
     if (this.watchdogInterval) {
-      
+
       return;
     }
     this.watchdogStarted = true;
-    
 
-    const runWatchdogCheck = async (init = false) => {
-      try {
-        if (!this.__token.value) {
-          this.__token.value = await this.getToken(false);
-        }
 
-        const res = await axios.get(
-          `${this.getBaseUrl()}${this.getPhpUrl()}`,
-          this._getAxiosRequestConfig(
-            {
-              type: "watchdog",
-              action: "get_events",
-              init,
-              cur_play_type: "1",
-              event_active_id: "0",
-              JsHttpRequest: "1-xml",
-            },
-            this.__token.value!,
-            {
-              validateStatus: (status) => status === 200,
-              withCredentials: true,
-              contentType: "application/json",
-            }
-          )
-        );
 
-        
 
-        this.handleWatchdogEvents(res.data);
-      } catch (err) {
-        console.error("Watchdog error:", err);
-      }
-    };
+    // await runWatchdogCheck(true);
 
-    await runWatchdogCheck(true);
-
-    this.watchdogInterval = setInterval(() => {
-      runWatchdogCheck();
-    }, interval * 1000);
+    // this.watchdogInterval = setInterval(() => {
+    //   runWatchdogCheck();
+    // }, interval * 1000);
   }
+
+  runWatchdogCheck = async (init = false) => {
+    try {
+      if (!this.__token.value) {
+        this.__token.value = await this.getToken(false);
+      }
+
+      const res = await axios.get(
+        `${this.getBaseUrl()}${this.getPhpUrl()}`,
+        this._getAxiosRequestConfig(
+          {
+            type: "watchdog",
+            action: "get_events",
+            init,
+            cur_play_type: "1",
+            event_active_id: "0",
+            JsHttpRequest: "1-xml",
+          },
+          this.__token.value!,
+          {
+            validateStatus: (status) => status === 200,
+            withCredentials: true,
+            contentType: "application/json",
+          }
+        )
+      );
+
+
+
+      this.handleWatchdogEvents(res.data);
+    } catch (err) {
+      console.error("Watchdog error:", err);
+    }
+  };
 
   stopWatchdog() {
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval);
       this.watchdogInterval = null;
-      
+
     }
   }
   private handleWatchdogEvents(data: any) {
@@ -129,7 +131,7 @@ export class StalkerAPI {
       return;
     }
 
-    
+
 
     switch (data.event) {
       case "reboot":
@@ -139,10 +141,10 @@ export class StalkerAPI {
         console.warn("Watchdog event: reload portal.");
         break;
       case "send_msg":
-        
+
         break;
       case "update_channels":
-        
+
         break;
       case "update_epg":
         console.log("Watchdog: EPG update requested...");
@@ -234,7 +236,7 @@ export class StalkerAPI {
         this.clearCache();
 
         const response: any = await this.performHandshake();
-        
+
         if (response?.js?.token) {
           this.__token.value = response.js.token;
           this.random = response.js.random;
@@ -270,7 +272,7 @@ export class StalkerAPI {
       throw new Error("No token to refresh");
     }
     try {
-      this.stopWatchdog();
+      // this.stopWatchdog();
       const profile = await httpRequest(`${this.getBaseUrl()}${this.getPhpUrl()}`,
         {
           type: "stb",
@@ -320,6 +322,7 @@ export class StalkerAPI {
       if (profile.js?.status === 2 && secondAuth == 0) {
         await this.__refreshToken(1);
       }
+      await this.runWatchdogCheck(true)
       // await axios.get(
       //   `${BASE_URL}/server/load.php`,
       //   this.getAxiosConfig(
@@ -410,7 +413,7 @@ export class StalkerAPI {
       if (response === "Authorization failed.") {
         throw new Error("Authorization Failed.");
       }
-      
+
       return response;
     } catch (error: any) {
       if (axios.isAxiosError(error) && error.response?.status === 401) {
@@ -467,18 +470,18 @@ export class StalkerAPI {
     search = "",
   }: MoviesApiParams) {
     const params = {
-        type: "vod",
-        action: "get_ordered_list",
-        category,
-        genre: "*",
-        p: page,
-        sortby: "added",
-        movie_id: movieId,
-        season_id: seasonId,
-        episode_id: episodeId,
-        search,
-      }
-      
+      type: "vod",
+      action: "get_ordered_list",
+      category,
+      genre: "*",
+      p: page,
+      sortby: "added",
+      movie_id: movieId,
+      season_id: seasonId,
+      episode_id: episodeId,
+      search,
+    }
+
     return this.makeRequest<Data<Programs<Video>>>(
       this.getPhpUrl(),
       params,

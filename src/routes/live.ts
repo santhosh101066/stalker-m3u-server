@@ -5,6 +5,7 @@ import http from "http";
 import https, { RequestOptions } from "https";
 import NodeCache from "node-cache";
 import { appConfig, initialConfig } from "@/config/server";
+import { ReqRefDefaults, ResponseToolkit } from "@hapi/hapi/lib/types";
 
 const SECRET_KEY = appConfig.proxy.secretKey;
 
@@ -83,44 +84,16 @@ async function populateCache(cmd: string): Promise<string> {
   return modifiedLines.join("\n");
 }
 
-async function handleNonProxy(cmd: string, h: any) {
+async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
   try {
     // First try the "redirected" URL
     const redirectedUrl = await cmdPlayerV2(cmd);
     if (redirectedUrl) {
-      const res = await axios.get(redirectedUrl, {
-        validateStatus: () => true,
-      });
-
-      // If redirected works → return
-      if (res.status >= 200 && res.status < 300 && res.data) {
-        return h
-          .response(res.data)
-          .type("application/vnd.apple.mpegurl")
-          .code(200);
-      }
-
-      console.warn(
-        `[Non-Proxy] Redirected URL failed with status ${res.status}, falling back...`
-      );
-    }
-
-    // Fallback to the original localhost stream
-    const fallbackUrl = `http://localhost/ch/${encodeURIComponent(cmd)}`;
-    const res2 = await axios.get(fallbackUrl, {
-      validateStatus: () => true,
-    });
-
-    if (res2.status >= 200 && res2.status < 300 && res2.data) {
       return h
-        .response(res2.data)
-        .type("application/vnd.apple.mpegurl")
-        .code(200);
+        .redirect(redirectedUrl)
+        .code(302);
     }
-
-    return h
-      .response({ error: `Both redirect and fallback failed (${res2.status})` })
-      .code(res2.status);
+    return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
   } catch (err) {
     console.error("Non-proxy error:", err);
     return h.response({ error: "Stream fetch failed" }).code(500);
@@ -234,7 +207,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       if ((res as any).isBoom) return res; // Early return if error response
 
       const lines = (res as AxiosResponse).data.split("\n");
-      const modifiedLines = lines.map((line:string) => {
+      const modifiedLines = lines.map((line: string) => {
         if (line.startsWith("#") || line.trim() === "") return line;
         if (line.match(".m3u8")) {
           record.subpath = line;
@@ -371,7 +344,7 @@ export const liveRoutes: ServerRoute[] = [
           return h.response(message).code(500);
         }
       } catch (err) {
-          console.error("[Player] Error fetching segment:", err);
+        console.error("[Player] Error fetching segment:", err);
       }
     },
   },
