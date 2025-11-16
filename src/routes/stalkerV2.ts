@@ -47,11 +47,22 @@ export const stalkerV2: ServerRoute[] = [
     path: "/api/v2/groups",
     handler: async (request, h) => {
       try {
-        const groups = readJSON("channel-groups.json");
+        const { all } = request.query as { all?: string };
+        const groups = readJSON<Genre>("channel-groups.json");
         if (groups.length === 0) {
           return h.redirect("/api/v2/refresh-groups");
         }
-        return groups;
+
+        // If 'all' is requested (for Admin), return everything
+        if (all === "true") {
+          return groups;
+        }
+
+        // Otherwise (for UI browsing), filter based on the config
+        const filteredGroups = groups.filter((group) =>
+          initialConfig.groups.includes(group.title)
+        );
+        return filteredGroups;
       } catch (err) {
         console.error(err);
         return h
@@ -93,10 +104,12 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = readJSON<Genre>("channel-groups.json");
-        return (channels ?? []).filter((channel) => {
-          const genre = genres.find((r) => r.id === channel.tv_genre_id);
-          return genre && initialConfig.groups.includes(genre.title);
-        });
+        return (channels ?? [])
+          .filter((channel) => {
+            const genre = genres.find((r) => r.id === channel.tv_genre_id);
+            return genre && initialConfig.groups.includes(genre.title);
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
         console.error(err);
         return h
@@ -200,7 +213,6 @@ export const stalkerV2: ServerRoute[] = [
         const itemsPerApiPage = 14;
         const pagesToFetchAtOnce = 1;
         const startApiPage = Number(page);
-
         const fetchPage = async (pageNum: number) => {
           try {
             const res = await stalkerApi.getMovies({
@@ -338,7 +350,6 @@ export const stalkerV2: ServerRoute[] = [
         const firstPageData = Array.isArray(firstResult.data)
           ? firstResult.data
           : [];
-
         // Use total_items from first successful result (fallback to 0)
         const actualTotalItems = firstResult.total_items ?? 0;
 
@@ -444,7 +455,8 @@ export const stalkerV2: ServerRoute[] = [
           .code(500);
       }
     },
-  },{
+  },
+  {
     method: "GET",
     path: "/api/v2/epg",
     handler: async (request, h) => {
