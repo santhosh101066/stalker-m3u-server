@@ -40,14 +40,22 @@ export const proxy: ServerRoute[] = [
 
       try {
         const decodedUrl = Buffer.from(url, 'base64').toString('utf-8');
-        const referer = ref ? Buffer.from(ref, 'base64').toString('utf-8') : undefined;
+        const referer = ref
+          ? Buffer.from(ref, 'base64').toString('utf-8')
+          : undefined;
 
+        // --- MODIFICATION START ---
+        // Pass essential headers from the client to the upstream server
         const requestHeaders: Record<string, string | undefined> = {
-          Referer: referer,
+          'Referer': referer,
+          'User-Agent': request.headers['user-agent'],
+          'Accept': request.headers['accept'],
+          'Accept-Encoding': request.headers['accept-encoding'], // Pass client's encoding preference
         };
         if (request.headers.range) {
           requestHeaders['Range'] = request.headers.range;
         }
+        // --- MODIFICATION END ---
 
         const response = await axios.get(decodedUrl, {
           responseType: 'stream',
@@ -56,26 +64,40 @@ export const proxy: ServerRoute[] = [
         });
 
         const stream = response.data as http.IncomingMessage;
-
         const hapiResponse = h.response(stream).code(response.status);
 
-        // Copy all headers from the upstream response
+        // --- MODIFICATION START ---
+        // Copy critical headers from the upstream response to the client
+        // Explicitly DO NOT copy 'content-encoding' as axios handles decompression
+        const headersToCopy = [
+          'content-type',
+          'content-length',
+          'accept-ranges',
+          'content-range',
+          'date',
+          'last-modified',
+          'etag',
+        ];
+
         for (const [key, value] of Object.entries(response.headers)) {
-          if (value) {
+          if (value && headersToCopy.includes(key.toLowerCase())) {
             hapiResponse.header(key, value.toString());
           }
         }
+        // --- MODIFICATION END ---
+
         // Add CORS headers
         hapiResponse.header('Access-Control-Allow-Origin', '*');
         hapiResponse.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
         hapiResponse.header('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-
         return hapiResponse;
       } catch (error: any) {
         console.error('[/proxy/stream] error:', error.message || error);
         if (error.response) {
-          return h.response({ error: 'Failed to fetch upstream content' }).code(error.response.status);
+          return h
+            .response({ error: 'Failed to fetch upstream content' })
+            .code(error.response.status);
         }
         return h.response({ error: 'Internal Server Error' }).code(500);
       }
@@ -91,13 +113,13 @@ export const proxy: ServerRoute[] = [
         const { url, ref } = request.query as Record<string, string | undefined>;
         if (!url) return h.response({ error: "No URL provided" }).code(400);
 
-        // Base64 decode inputs
         const decodedUrl = Buffer.from(url, "base64").toString("utf-8");
-        const referer = ref ? Buffer.from(ref, "base64").toString("utf-8") : undefined;
+        const referer = ref
+          ? Buffer.from(ref, "base64").toString("utf-8")
+          : undefined;
 
         const playlistUrl = assertHttpUrl(decodedUrl).href;
 
-        // Fetch playlist text (follow redirects)
         const headers: Record<string, string> = {};
         if (referer) headers["Referer"] = referer;
 
@@ -113,29 +135,50 @@ export const proxy: ServerRoute[] = [
 
         const body = resp.data || "";
         if (!body.startsWith("#EXTM3U")) {
-          // Not an M3U8? Just return raw
           return h.response(body).type("text/plain");
         }
 
-        // Rewrite lines
-        const rewritten = body
-          .split("\n")
-          .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith("#")) return line;
+        // --- NEW REWRITE LOGIC ---
+        
+        // Regex to find:
+        // 1. URI="([^"]+)" (captures the URL in group 2)
+        // 2. A line that is not a tag and not empty (captures the URL in group 3)
+        const urlRegex = /(URI="([^"]+)")|((^[^#\n\r].*)$)/gm;
 
-            // Check if line is a sub-playlist (ends with .m3u8 or contains .m3u8?)
-            if (trimmed.endsWith(".m3u8") || trimmed.includes(".m3u8?")) {
-              // Resolve as absolute URL against the playlist URL
-              const absolute = new URL(trimmed, playlistUrl).href;
-              const b64url = Buffer.from(absolute).toString("base64");
-              const b64ref = referer ? Buffer.from(referer).toString("base64") : undefined;
-              return `/api/proxy?url=${b64url}` + (b64ref ? `&ref=${b64ref}` : "");
+        const rewritten = body.replace(
+          urlRegex,
+          (match, uriAttribute, uriValue, segmentUrl) => {
+            // Determine which part of the regex matched
+            const urlToRewrite = uriValue || segmentUrl;
+            if (!urlToRewrite) return match;
+
+            const absolute = new URL(urlToRewrite, playlistUrl).href;
+            const b64url = Buffer.from(absolute).toString("base64");
+            const b64ref = referer
+              ? Buffer.from(referer).toString("base64")
+              : undefined;
+
+            let proxiedUrl: string;
+
+            // Check if the URL is another playlist or a segment
+            if (urlToRewrite.endsWith(".m3u8") || urlToRewrite.includes(".m3u8?")) {
+              // It's a playlist, proxy it through this /api/proxy endpoint
+              proxiedUrl = `/api/proxy?url=${b64url}` + (b64ref ? `&ref=${b64ref}` : "");
+            } else {
+              // It's a segment, proxy it through the /api/proxy/stream endpoint
+              proxiedUrl = getProxiedUrl(absolute, referer);
             }
-            const absolute = new URL(trimmed, playlistUrl).href;
-            return getProxiedUrl(absolute, referer);
-          })
-          .join("\n");
+
+            if (uriValue) {
+              // Re-wrap it in the URI="..." attribute
+              return `URI="${proxiedUrl}"`;
+            } else {
+              // It was a plain URL, so just return the proxied URL
+              return proxiedUrl;
+            }
+          }
+        );
+        // --- END NEW LOGIC ---
 
         return h
           .response(rewritten)

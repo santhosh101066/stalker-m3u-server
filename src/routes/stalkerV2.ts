@@ -2,7 +2,8 @@ import { ServerRoute } from "@hapi/hapi";
 import { readJSON, writeJSON } from "@/utils/storage";
 import { initialConfig } from "@/config/server";
 import { stalkerApi } from "@/utils/stalker";
-import { Genre, Channel } from "@/types/types";
+import { Genre, Channel, EPG_List } from "@/types/types"; // Import EPG_List
+import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
 
 export const stalkerV2: ServerRoute[] = [
   {
@@ -440,6 +441,24 @@ export const stalkerV2: ServerRoute[] = [
             success: false,
             error: "Failed to retrieve channel link.",
           })
+          .code(500);
+      }
+    },
+  },{
+    method: "GET",
+    path: "/api/v2/epg",
+    handler: async (request, h) => {
+      try {
+        const cache = await getEpgCache();
+        if (cache) {
+          return cache; // Return { timestamp, data }
+        }
+        const epgData = await fetchAndCacheEpg();
+        return epgData; // Return { timestamp, data }
+      } catch (err) {
+        console.error(err);
+        return h
+          .response({ success: false, error: "Failed to retrieve EPG." })
           .code(500);
       }
     },
