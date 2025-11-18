@@ -42,7 +42,8 @@ const init = async () => {
         !filePath.endsWith(".css") &&
         !filePath.endsWith(".png") &&
         !filePath.endsWith(".jpg") &&
-        !filePath.endsWith(".ico")
+        !filePath.endsWith(".ico") &&
+        !filePath.endsWith(".svg")
       ) {
         return h.file(path.join(process.cwd(), "public", "index.html"));
       }

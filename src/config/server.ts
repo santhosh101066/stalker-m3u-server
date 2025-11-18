@@ -17,7 +17,8 @@ const ConfigDefault: Config = {
   stbType: "MAG270",
   groups: ["Tamil"],
   proxy: false,
-  tokens: []
+  tokens: [],
+  playCensored: false,
 };
 
 const AppConfigDefault: AppConfig = {

@@ -24,6 +24,7 @@ export interface Config extends BaseConfig {
   groups: string[];
   tokens: string[];
   proxy: boolean;
+  playCensored: boolean;
 }
 
 export type VodOrdering = "none" | "rating" | "alphabetic";

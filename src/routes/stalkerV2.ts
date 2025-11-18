@@ -30,7 +30,7 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const category = await stalkerApi.getChannelGroups();
         const filteredCategory = category.js.filter(
-          (group) => group.censored != 1
+         (group) => initialConfig.playCensored || group.censored != 1
         );
         writeJSON("channel-groups.json", filteredCategory);
         return filteredCategory;
@@ -78,7 +78,7 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const channels = await stalkerApi.getChannels();
         const filteredChannels = channels.js.data.filter(
-          (channel) => String(channel.censored) !== "1"
+          (channel) => initialConfig.playCensored || String(channel.censored) !== "1"
         );
         writeJSON("channels.json", filteredChannels);
         const genres = readJSON<Genre>("channel-groups.json");
@@ -125,7 +125,7 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const groups = await stalkerApi.getMoviesGroups();
         const filteredChannels = groups.js.filter(
-          (channel) => channel.censored != 1
+          (channel) => initialConfig.playCensored || channel.censored != 1
         );
         writeJSON("movie-groups.json", filteredChannels);
         return filteredChannels;
@@ -179,7 +179,7 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const groups = await stalkerApi.getMoviesGroups();
         const filteredChannels = groups.js.filter(
-          (channel) => channel.censored != 1
+         (channel) => initialConfig.playCensored || channel.censored != 1
         );
         writeJSON("movies.json", []);
         return { success: true, data: filteredChannels };
@@ -399,7 +399,7 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const groups = await stalkerApi.getSeriesGroups();
         const filteredChannels = groups.js.filter(
-          (channel) => channel.censored != 1
+          (channel) => initialConfig.playCensored || channel.censored != 1
         );
         writeJSON("series-groups.json", filteredChannels);
         return { success: true, data: filteredChannels };

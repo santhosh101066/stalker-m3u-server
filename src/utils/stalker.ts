@@ -301,7 +301,7 @@ export class StalkerAPI {
       throw new Error("No token to refresh");
     }
     try {
-      // this.stopWatchdog();
+      this.stopWatchdog();
       const profile = await httpRequest(`${this.getBaseUrl()}${this.getPhpUrl()}`,
         {
           type: "stb",
