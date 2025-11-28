@@ -1,28 +1,33 @@
-import { readJSON, writeJSON } from "./storage";
+import { readChannels, readGenres, readEpgCache, writeEpgCache } from "./storage";
 import { stalkerApi } from "./stalker";
 import { Channel, EPG_List, Genre } from "@/types/types";
 import { initialConfig } from "@/config/server";
+import { ConfigProfile } from "@/models/ConfigProfile"; // Import ConfigProfile
 
-const EPG_CACHE_FILE = "epg-cache.json";
 const CACHE_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 interface EpgCache {
-  timestamp: number;
+  timestamp: Date;
   data: Record<string, EPG_List[]>;
 }
 
 /**
- * Reads the EPG cache from disk.
+ * Reads the EPG cache from database for the active profile.
  * Returns null if the cache is stale or does not exist.
  */
 export async function getEpgCache(): Promise<EpgCache | null> {
   try {
-    const cache = readJSON<EpgCache>(EPG_CACHE_FILE)[0]; // readJSON returns T[]
+    // --- NEW: Get Active Profile ID ---
+    const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+    const profileId = activeProfile?.id;
+    // ----------------------------------
+
+    const cache = await readEpgCache(profileId); // Pass profileId
     if (!cache) {
       return null;
     }
 
-    const isStale = Date.now() - cache.timestamp > CACHE_DURATION_MS;
+    const isStale = Date.now() - new Date(cache.timestamp).getTime() > CACHE_DURATION_MS;
     if (isStale) {
       return null;
     }
@@ -34,12 +39,19 @@ export async function getEpgCache(): Promise<EpgCache | null> {
 }
 
 /**
- * Fetches EPG for all filtered channels and writes to cache.
+ * Fetches EPG for all filtered channels and writes to cache for the active profile.
  */
 export async function fetchAndCacheEpg(): Promise<EpgCache> {
   console.log("Fetching fresh EPG data...");
-  const channels = readJSON<Channel>("channels.json");
-  const genres = readJSON<Genre>("channel-groups.json");
+  
+  // --- NEW: Get Active Profile ID ---
+  const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+  const profileId = activeProfile?.id;
+  // ----------------------------------
+
+  // Pass profileId to reads
+  const channels = await readChannels(profileId); 
+  const genres = await readGenres("channel", profileId);
 
   // Filter channels based on the user's config
   const filteredChannels = channels.filter((channel) => {
@@ -73,13 +85,13 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
   }, {});
 
   const cache: EpgCache = {
-    timestamp: Date.now(),
+    timestamp: new Date(),
     data: epgData,
   };
 
-  // Write to cache (readJSON expects an array)
+  // Write to cache with profileId
   try {
-    writeJSON(EPG_CACHE_FILE, [cache]);
+    await writeEpgCache(cache, profileId);
   } catch (error) {
     console.error("Failed to write EPG cache:", error);
   }

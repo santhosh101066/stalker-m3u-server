@@ -5,7 +5,7 @@ import {
   M3ULine,
 } from "@/types/types";
 import { initialConfig } from "@/config/server";
-import { readJSON } from "./storage";
+import { readChannels, readGenres } from "./storage";
 import { stalkerApi } from "./stalker";
 
 function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
@@ -37,9 +37,9 @@ function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
 
 
 export async function getPlaylistV2() {
-  const genres = readJSON<Genre>("channel-groups.json");
-  const allPrograms = readJSON<Channel>("channels.json");
-  const m3u = (allPrograms?? []).filter((channel) => {
+  const genres = await readGenres("channel");
+  const allPrograms = await readChannels();
+  const m3u = (allPrograms ?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
     return genre && initialConfig.groups.includes(genre.title);
   });
@@ -47,8 +47,8 @@ export async function getPlaylistV2() {
 }
 
 export async function getM3uV2(host: string) {
-  const genres = readJSON<Genre>("channel-groups.json");
-  const allPrograms = readJSON<Channel>("channels.json");
+  const genres = await readGenres("channel");
+  const allPrograms = await readChannels();
   // const m3u = (allPrograms.js.data ?? []).filter((channel) => {
   //   const genre = genres.find((r) => r.id === channel.tv_genre_id);
   //   return genre && initialConfig.groups.includes(genre.title);
@@ -72,7 +72,7 @@ export async function getM3uV2(host: string) {
 
 
 export async function getEPGV2() {
-  const genres = readJSON<Genre>("channel-groups.json");
+  const genres = await readGenres("channel");
   const allPrograms = await stalkerApi.getChannels();
   const channels = (allPrograms.js.data ?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);

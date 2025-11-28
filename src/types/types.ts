@@ -199,3 +199,28 @@ export interface MoviesApiParams {
   search?: string;
   token?: string;
 }
+
+export interface ConfigProfileData {
+  id: number;
+  name: string;
+  description?: string;
+  config: Config;
+  isActive: boolean;
+  isEnabled: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateProfileRequest {
+  name: string;
+  description?: string;
+  config: Config;
+  isEnabled?: boolean;
+}
+
+export interface UpdateProfileRequest {
+  name?: string;
+  description?: string;
+  config?: Config;
+  isEnabled?: boolean;
+}

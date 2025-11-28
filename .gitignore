@@ -28,3 +28,4 @@ dist
 stalker-m3u-server.tar
 .mem
 token.json
+database.sqlite

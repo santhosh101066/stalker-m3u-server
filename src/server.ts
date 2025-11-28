@@ -2,6 +2,7 @@ import { initialConfig, serverConfig } from "@/config/server";
 import { playlistRoutes } from "./routes/playlist";
 import { liveRoutes } from "./routes/live";
 import { configRoutes } from "./routes/config";
+import { profileRoutes } from "./routes/profiles";
 import Hapi from "@hapi/hapi";
 import Inert from "@hapi/inert";
 import { serverManager } from "./serverManager";
@@ -11,7 +12,18 @@ import { proxy } from "./routes/proxy";
 import { stalkerApi } from "./utils/stalker";
 import { portalProxy } from "./routes/portalProxy";
 
+import { initDB } from "./db";
+import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
+
 const init = async () => {
+  await initDB();
+
+  // Migrate to profiles system if needed
+  await migrateToProfiles();
+
+  // Load active profile configuration
+  await loadActiveProfileFromDB();
+
   // Register routes
   const server = Hapi.server({
     ...serverConfig,
@@ -22,6 +34,7 @@ const init = async () => {
   server.route(playlistRoutes);
   server.route(liveRoutes);
   server.route(configRoutes);
+  server.route(profileRoutes);
   server.route(stalkerV2);
   server.route(proxy);
   server.route(portalProxy);
@@ -56,17 +69,17 @@ const init = async () => {
     console.log(
       ["debug"],
       request.info.remoteAddress +
-        ": " +
-        request.method.toUpperCase() +
-        " " +
-        request.path +
-        " --> " +
-        (request.response &&
+      ": " +
+      request.method.toUpperCase() +
+      " " +
+      request.path +
+      " --> " +
+      (request.response &&
         typeof (request.response as any).statusCode === "number"
-          ? (request.response as any).statusCode
-          : request.response &&
-            (request.response as any).output &&
-            (request.response as any).output.statusCode)
+        ? (request.response as any).statusCode
+        : request.response &&
+        (request.response as any).output &&
+        (request.response as any).output.statusCode)
     );
   });
 

@@ -9,12 +9,11 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install
 
-# Copy config files to root
-COPY config.json appConfig.json ./
+# Copy SQLite database file (if you want to persist the DB image-to-image, otherwise remove this too)
+COPY database.sqlite ./ 
 
 # Copy source code
 COPY . .
-COPY .mem /.mem
 
 # Build the application
 RUN npm run build

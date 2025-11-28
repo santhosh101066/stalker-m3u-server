@@ -10,17 +10,13 @@ import {
   Programs,
   Video,
 } from "@/types/types";
-import axios from "axios";
-import type { AxiosError, AxiosRequestConfig } from "axios";
-import { promises as fsPromises } from "fs";
-import path from "path";
-import NodeCache from "node-cache"; // ADDED
+import axios, { AxiosError, AxiosRequestConfig } from "axios";
+import NodeCache from "node-cache";
+import { Token } from "@/models/Token";
+import pLimit from "p-limit";
 
-type RequestOptions = {
-  method?: string;
-  headers?: Record<string, string>;
-  timeout?: number;
-};
+// Limit concurrent requests to the Portal to 5 at a time
+const requestLimit = pLimit(5);
 
 async function httpRequest<T = any>(
   url: string,
@@ -44,10 +40,7 @@ async function httpRequest<T = any>(
 }
 
 export class StalkerAPI {
-  // CHANGED: Replaced private token variables with NodeCache
-  // stdTTL: 3600s (1 hour), checkperiod: 600s (10 mins)
-  private cache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
-  
+  private cache = new NodeCache({ stdTTL: 3700, checkperiod: 600 });
   private random: string = "";
   private uid: string = "";
   private isProfileFetching: boolean = false;
@@ -58,7 +51,22 @@ export class StalkerAPI {
   private watchdogStarted: boolean = false;
   private activeChannelId: string = "0";
 
-  constructor() {}
+  constructor() {
+    this.loadTokenFromDB();
+  }
+
+  private async loadTokenFromDB() {
+    try {
+      const tokenRecord = await Token.findOne({ where: { isValid: true } });
+      if (tokenRecord?.token) {
+        console.log(`[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`);
+        this.cache.set("auth_token", tokenRecord.token, 3600);
+        this.startWatchdog();
+      }
+    } catch (err) {
+      console.warn("[StalkerAPI] Could not restore token from DB");
+    }
+  }
 
   getBaseUrl() {
     return `http://${initialConfig.hostname}:${initialConfig.port}${
@@ -66,6 +74,7 @@ export class StalkerAPI {
     }`;
   }
 
+  // Used for Content Requests AND Auth (Dynamic based on context)
   getPhpUrl() {
     return initialConfig.contextPath != "" ? "/server/load.php" : "/portal.php";
   }
@@ -93,21 +102,20 @@ export class StalkerAPI {
 
   runWatchdogCheck = async (init = false) => {
     try {
-      // CHANGED: Check cache instead of local variable
       let currentToken = this.cache.get<string>("auth_token");
-      
+
       if (!currentToken) {
         console.log("[Watchdog] Token missing, fetching new token...");
         currentToken = (await this.getToken(false)) || "";
       }
 
-      if (!currentToken) return; // Avoid crashing if token fetch fails
+      if (!currentToken) return;
 
       const currentTime = new Date().toISOString().split("T")[1].split(".")[0];
-      console.log(
-        `[Watchdog ${currentTime}] Sending heartbeat... (Channel: ${this.activeChannelId}, PlayType: 1)`
-      );
-
+      
+      // Watchdog usually goes to getPhpUrl() (load.php or portal.php depending on config)
+      // kept as getPhpUrl() unless this specifically needs portal.php too.
+      // Usually watchdog events come from the load balancer/server script.
       const res = await axios.get(
         `${this.getBaseUrl()}${this.getPhpUrl()}`,
         this._getAxiosRequestConfig(
@@ -115,7 +123,7 @@ export class StalkerAPI {
             type: "watchdog",
             action: "get_events",
             init,
-            cur_play_type: "1", // 1 = Live TV
+            cur_play_type: "1",
             event_active_id: this.activeChannelId,
             JsHttpRequest: "1-xml",
           },
@@ -129,10 +137,7 @@ export class StalkerAPI {
       );
 
       if (res.status === 200) {
-        const hasEvents = res.data?.data ? res.data.data.length > 0 : false;
-        console.log(
-          `[Watchdog] OK. Events received: ${hasEvents ? "Yes" : "None"}`
-        );
+        // Log success silently or verbose
       } else {
         console.warn(`[Watchdog] Unexpected status code: ${res.status}`);
       }
@@ -156,9 +161,6 @@ export class StalkerAPI {
     if (!data || !data.event) {
       return;
     }
-
-    console.log(`[Watchdog] Processing event: ${data.event}`);
-
     switch (data.event) {
       case "reboot":
         console.warn("[Watchdog] Event: REBOOT required.");
@@ -215,11 +217,8 @@ export class StalkerAPI {
     };
   }
 
-  private delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
   private async performHandshake(token: string = "") {
+    // --- UPDATED: Uses getPhpUrl() (Dynamic: load.php if context exists, portal.php if empty) ---
     return httpRequest(
       `${this.getBaseUrl()}${this.getPhpUrl()}`,
       {
@@ -247,63 +246,57 @@ export class StalkerAPI {
 
   async getToken(refreshToken: boolean) {
     try {
-      // CHANGED: Logic to use NodeCache with 5-minute buffer check
       const cachedToken = this.cache.get<string>("auth_token");
-      const ttl = this.cache.getTtl("auth_token"); // Returns timestamp of expiry or undefined
-      
-      // If token exists, we are not forcing refresh, and we have > 5 minutes (300000ms) remaining
-      if (
-        !refreshToken &&
-        cachedToken &&
-        ttl &&
-        ttl - Date.now() > 5 * 60 * 1000
-      ) {
+      const ttl = this.cache.getTtl("auth_token");
+
+      if (!refreshToken && cachedToken && ttl && ttl - Date.now() > 5 * 60 * 1000) {
         return cachedToken;
       }
 
-      // 2. If a refresh is already in progress, wait for it
       if (this.profileRefreshPromise) {
         console.log("Waiting for in-progress token refresh...");
         return this.profileRefreshPromise;
       }
 
-      // 3. Start a new refresh and store the promise
       this.profileRefreshPromise = (async () => {
         try {
+          this.isProfileFetching = true;
           const currentToken = this.cache.get<string>("auth_token");
-          // If we have a token, try to refresh it
+
           if (currentToken) {
             try {
               await this.__refreshToken();
-              return this.cache.get<string>("auth_token") || null;
+              const newToken = this.cache.get<string>("auth_token");
+              this.isProfileFetching = false;
+              return newToken || null;
             } catch (refreshError) {
-              console.warn(
-                "Token refresh failed, forcing full re-handshake.",
-                (refreshError as Error).message
-              );
-              this.clearCache();
+              console.warn("Token refresh failed, forcing full re-handshake.");
             }
           }
 
-          // 4. Full handshake
-          this.clearCache();
+          console.log("Performing full handshake...");
+          this.cache.del("auth_token"); 
+          
           const response: any = await this.performHandshake();
 
           if (response?.js?.token) {
-            // CHANGED: Store in Cache
-            // Note: We don't set TTL here yet because __refreshToken will confirm validity
-            this.cache.set("auth_token", response.js.token, 3600);
-            
+            const newToken = response.js.token;
             this.random = response.js.random;
-            
+
+            this.cache.set("auth_token", newToken, 3600);
+            this.updateTokenInDB(newToken);
+
             await this.__refreshToken();
-            return this.cache.get<string>("auth_token") || null;
+            
+            this.isProfileFetching = false;
+            return newToken;
           } else {
             throw new Error("Authentication failed - Invalid handshake response");
           }
         } catch (err) {
           console.error("getToken inner promise error:", err);
-          this.clearCache();
+          this.cache.del("auth_token");
+          this.isProfileFetching = false;
           throw err;
         } finally {
           this.profileRefreshPromise = null;
@@ -318,8 +311,16 @@ export class StalkerAPI {
     }
   }
 
+  private async updateTokenInDB(token: string) {
+    try {
+        // Keeping only one valid token for simplicity in home use, 
+        // or append if you prefer history.
+        await Token.destroy({ where: {} });
+        await Token.create({ token, isValid: true });
+    } catch(e) { console.error("DB Token update failed", e)}
+  }
+
   clearCache() {
-    // CHANGED: Clear NodeCache
     this.cache.del("auth_token");
     this.random = "";
   }
@@ -330,9 +331,9 @@ export class StalkerAPI {
       throw new Error("No token to refresh");
     }
     try {
-      // Note: We pause watchdog during auth refresh to prevent conflicts
       this.stopWatchdog();
 
+      // --- UPDATED: Uses getPhpUrl() (Dynamic: load.php if context exists, portal.php if empty) ---
       const profile = await httpRequest(
         `${this.getBaseUrl()}${this.getPhpUrl()}`,
         {
@@ -390,10 +391,7 @@ export class StalkerAPI {
       if (profile.js.status === 2 && secondAuth == 0) {
         await this.__refreshToken(1);
       } else {
-        // CHANGED: Refresh Successful - Reset TTL to 1 hour
         this.cache.ttl("auth_token", 3600);
-        
-        // Restart watchdog after successful refresh
         await this.startWatchdog();
       }
     } catch (error) {
@@ -411,54 +409,63 @@ export class StalkerAPI {
     isFetch = true,
     loop = false
   ): Promise<T> {
-    // CHANGED: Get from Cache
-    let token = this.cache.get<string>("auth_token");
     
-    if (!token) {
-      token = (await this.getToken(false)) || "";
-    }
-    
-    const url = `${this.getBaseUrl()}${endpoint}`;
-    try {
-      const response = await httpRequest(
-        url,
-        { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
-        (() => {
-          const config = this._getAxiosRequestConfig({}, token!, {
-            referrer: this.getBaseUrl(),
-          });
-          return {
-            method: config.method,
-            headers: config.headers as Record<string, string>,
-            timeout: config.timeout,
-          };
-        })()
-      );
+    // --- QUEUE LIMITER APPLIED HERE ---
+    return requestLimit(async () => {
+        console.log(this.getBaseUrl());
+        
+        let token = this.cache.get<string>("auth_token");
+        if (!token) {
+            token = (await this.getToken(false)) || "";
+        }
 
-      if (
-        typeof response === "string" &&
-        response.startsWith("Authorization failed.") &&
-        !loop &&
-        !this.isProfileFetching
-      ) {
-        console.log(response, " - Fetching new token and retrying...");
-        // Force refresh
-        await this.getToken(true);
-        return this.makeRequest(endpoint, params, isFetch, true);
-      }
-      if (response === "Authorization failed.") {
-        throw new Error("Authorization Failed.");
-      }
+        const url = `${this.getBaseUrl()}${endpoint}`;
+        
+        try {
+            const response = await httpRequest(
+                url,
+                { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
+                (() => {
+                    const config = this._getAxiosRequestConfig({}, token!, {
+                        referrer: this.getBaseUrl(),
+                    });
+                    return {
+                        method: config.method,
+                        headers: config.headers as Record<string, string>,
+                        timeout: config.timeout,
+                    };
+                })()
+            );
 
-      return response;
-    } catch (error: any) {
-      if (axios.isAxiosError(error) && error.response?.status === 401) {
-        this.clearCache();
-        this.isProfileFetching = false;
-      }
-      throw error;
-    }
+            if (
+                (typeof response === "string" && response.startsWith("Authorization failed.")) ||
+                response === "Authorization failed."
+            ) {
+                if (!loop && !this.isProfileFetching) {
+                    console.log("Auth failed. Refreshing token and retrying request...");
+                    await this.getToken(true);
+                    return this.makeRequest(endpoint, params, isFetch, true);
+                }
+                throw new Error("Authorization Failed.");
+            }
+
+            return response;
+
+        } catch (error: any) {
+            if (axios.isAxiosError(error) && error.response?.status === 401) {
+                if (!loop) {
+                    console.warn("401 detected. Retrying with fresh token...");
+                    this.cache.del("auth_token");
+                    await this.getToken(true);
+                    return this.makeRequest(endpoint, params, isFetch, true);
+                }
+            }
+            throw error;
+        }
+    });
   }
+
+  // --- CONTENT METHODS USE getPhpUrl() (Server Load PHP) ---
 
   async getChannelGroups() {
     return this.makeRequest<Data<Genre[]>>(this.getPhpUrl(), {
@@ -523,6 +530,7 @@ export class StalkerAPI {
       false
     );
   }
+
   async getSeries({
     category,
     page,
@@ -573,6 +581,8 @@ export class StalkerAPI {
       cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
     };
 
+    // Note: getMovieLink explicitly used "/server/load.php" in original.
+    // getPhpUrl() will return that anyway if contextPath exists.
     return this.makeRequest<Data<Programs<Video>>>(
       "/server/load.php",
       params
@@ -615,29 +625,23 @@ export class StalkerAPI {
     });
   }
 
-  addToken(token: string) {
-    if (!initialConfig.tokens.includes(token)) {
-      initialConfig.tokens.push(token);
-      const configPath = path.join(process.cwd(), "config.json");
-      fsPromises
-        .writeFile(configPath, JSON.stringify(initialConfig, null, 2))
-        .catch((err) => {
-          console.error("Failed to save config:", err);
-        });
+  async addToken(token: string) {
+    try {
+      await Token.findOrCreate({ where: { token } });
+      if (!initialConfig.tokens.includes(token)) {
+        initialConfig.tokens.push(token);
+      }
+    } catch (err) {
+      console.error("Failed to save token to DB:", err);
     }
   }
 
-  removeToken(token: string) {
-    if (initialConfig.tokens.includes(token)) {
+  async removeToken(token: string) {
+    try {
+      await Token.destroy({ where: { token } });
       initialConfig.tokens = initialConfig.tokens.filter((t) => t !== token);
-      const configPath = path.join(process.cwd(), "config.json");
-      fsPromises
-        .writeFile(configPath, JSON.stringify(initialConfig, null, 2))
-        .catch((err) => {
-          if (err) {
-            console.error("Failed to save config:", err);
-          }
-        });
+    } catch (err) {
+      console.error("Failed to remove token from DB:", err);
     }
   }
 }
