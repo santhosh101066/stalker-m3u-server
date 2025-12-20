@@ -3,6 +3,15 @@ FROM node:18-alpine
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies
+RUN apk add --no-cache ffmpeg tzdata
+
+# Set Timezone to IST
+
+
+# Set Timezone to IST
+ENV TZ=Asia/Kolkata
+
 # Copy package files
 COPY package*.json ./
 

@@ -11,6 +11,9 @@ import path from "path";
 import { proxy } from "./routes/proxy";
 import { stalkerApi } from "./utils/stalker";
 import { portalProxy } from "./routes/portalProxy";
+import { xtreamRoutes } from "./routes/xtream";
+import { streamRoutes } from "./routes/stream";
+import { vodRoutes } from "./routes/vod"; // Import vodRoutes
 
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
@@ -23,6 +26,9 @@ const init = async () => {
 
   // Load active profile configuration
   await loadActiveProfileFromDB();
+
+  // Re-initialize provider with loaded config
+  serverManager.initProvider();
 
   // Register routes
   const server = Hapi.server({
@@ -38,6 +44,9 @@ const init = async () => {
   server.route(stalkerV2);
   server.route(proxy);
   server.route(portalProxy);
+  server.route(xtreamRoutes);
+  server.route(streamRoutes);
+  server.route(vodRoutes); // Register vodRoutes
 
   server.route({
     method: "GET",

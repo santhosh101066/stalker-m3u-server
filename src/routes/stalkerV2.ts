@@ -7,15 +7,15 @@ import {
   writeGenres,
 } from "@/utils/storage";
 import { initialConfig } from "@/config/server";
-import { stalkerApi } from "@/utils/stalker";
+import { serverManager } from "@/serverManager";
 import { Genre, Channel, EPG_List } from "@/types/types";
 import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
 import { ConfigProfile } from "@/models/ConfigProfile"; // Import ConfigProfile
 
 // Helper to get active profile ID
 const getActiveProfileId = async () => {
-    const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
-    return activeProfile?.id;
+  const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+  return activeProfile?.id;
 };
 
 export const stalkerV2: ServerRoute[] = [
@@ -42,7 +42,7 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const profileId = await getActiveProfileId(); // Get ID
-        const category = await stalkerApi.getChannelGroups();
+        const category = await serverManager.getProvider().getChannelGroups();
         const filteredCategory = category.js.filter(
           (group) => initialConfig.playCensored || group.censored != 1
         );
@@ -64,7 +64,7 @@ export const stalkerV2: ServerRoute[] = [
         const profileId = await getActiveProfileId(); // Get ID
         const { all } = request.query as { all?: string };
         const groups = await readGenres("channel", profileId); // Read with ID
-        
+
         if (groups.length === 0) {
           return h.redirect("/api/v2/refresh-groups");
         }
@@ -76,7 +76,7 @@ export const stalkerV2: ServerRoute[] = [
 
         // Otherwise (for UI browsing), filter based on the config
         const filteredGroups = groups.filter((group) =>
-          initialConfig.groups.includes(group.title)
+          initialConfig.groups.length === 0 || initialConfig.groups.includes(group.title)
         );
         return filteredGroups;
       } catch (err) {
@@ -93,7 +93,7 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const profileId = await getActiveProfileId(); // Get ID
-        const channels = await stalkerApi.getChannels();
+        const channels = await serverManager.getProvider().getChannels();
         const filteredChannels = channels.js.data.filter(
           (channel) => initialConfig.playCensored || String(channel.censored) !== "1"
         );
@@ -101,7 +101,7 @@ export const stalkerV2: ServerRoute[] = [
         const genres = await readGenres("channel", profileId);
         return (filteredChannels ?? []).filter((channel) => {
           const genre = genres.find((r) => r.id === channel.tv_genre_id);
-          return genre && initialConfig.groups.includes(genre.title);
+          return genre && (initialConfig.groups.length === 0 || initialConfig.groups.includes(genre.title));
         });
       } catch (err) {
         console.error(err);
@@ -125,7 +125,7 @@ export const stalkerV2: ServerRoute[] = [
         return (channels ?? [])
           .filter((channel) => {
             const genre = genres.find((r) => r.id === channel.tv_genre_id);
-            return genre && initialConfig.groups.includes(genre.title);
+            return genre && (initialConfig.groups.length === 0 || initialConfig.groups.includes(genre.title));
           })
           .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
@@ -142,7 +142,7 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const profileId = await getActiveProfileId(); // Get ID
-        const groups = await stalkerApi.getMoviesGroups();
+        const groups = await serverManager.getProvider().getMoviesGroups();
         const filteredChannels = groups.js.filter(
           (channel) => initialConfig.playCensored || channel.censored != 1
         );
@@ -180,7 +180,7 @@ export const stalkerV2: ServerRoute[] = [
           total_loaded: channels.length,
           data: channels,
           errors: false,
-          isPortal: initialConfig.contextPath == "",
+          isPortal: initialConfig.providerType === 'stalker',
         };
       } catch (err) {
         console.error(err);
@@ -201,7 +201,7 @@ export const stalkerV2: ServerRoute[] = [
         // This seems to just fetch from Stalker again without saving?
         // Or if 'writeJSON' was used previously, it should be updated.
         // Assuming this route is for debug/reset.
-        const groups = await stalkerApi.getMoviesGroups();
+        const groups = await serverManager.getProvider().getMoviesGroups();
         const filteredChannels = groups.js.filter(
           (channel) => initialConfig.playCensored || channel.censored != 1
         );
@@ -229,6 +229,7 @@ export const stalkerV2: ServerRoute[] = [
           page = 1,
           search = "",
           token,
+          sort,
         } = request.query;
 
         if (category == 0) {
@@ -240,7 +241,11 @@ export const stalkerV2: ServerRoute[] = [
         const startApiPage = Number(page);
         const fetchPage = async (pageNum: number) => {
           try {
-            const res = await stalkerApi.getMovies({
+            let sortParam = 'added';
+            if (sort === 'alphabetic') sortParam = 'name';
+            // 'latest' and 'oldest' map to 'added'
+
+            const res = await serverManager.getProvider().getMovies({
               category,
               page: pageNum,
               movieId,
@@ -248,6 +253,7 @@ export const stalkerV2: ServerRoute[] = [
               episodeId,
               search,
               token,
+              sort: sortParam,
             });
             return { page: pageNum, ...res.js };
           } catch (err) {
@@ -292,7 +298,7 @@ export const stalkerV2: ServerRoute[] = [
           total_loaded: firstPageData.length,
           data: firstPageData,
           errors: false,
-          isPortal: initialConfig.contextPath == "",
+          isPortal: initialConfig.providerType === 'stalker',
         };
       } catch (err) {
         console.error(err);
@@ -315,10 +321,11 @@ export const stalkerV2: ServerRoute[] = [
           page = 1,
           search = "",
           token,
+          sort,
           ...others
         } = request.query;
 
-        if (category == 0) {
+        if (category == 0 && movieId == 0) {
           return h.redirect("/api/v2/series-groups");
         }
 
@@ -328,7 +335,11 @@ export const stalkerV2: ServerRoute[] = [
 
         const fetchPage = async (pageNum: number) => {
           try {
-            const res = await stalkerApi.getSeries({
+            let sortParam = 'added';
+            if (sort === 'alphabetic') sortParam = 'name';
+            // 'latest' and 'oldest' map to 'added'
+
+            const res = await serverManager.getProvider().getSeries({
               category,
               page: pageNum,
               movieId,
@@ -336,6 +347,7 @@ export const stalkerV2: ServerRoute[] = [
               episodeId,
               search,
               token,
+              sort: sortParam,
               ...others,
             });
             return { page: pageNum, ...res.js };
@@ -380,7 +392,7 @@ export const stalkerV2: ServerRoute[] = [
           total_loaded: firstPageData.length,
           data: firstPageData,
           errors: false,
-          isPortal: initialConfig.contextPath == "",
+          isPortal: initialConfig.providerType === 'stalker',
         };
       } catch (err) {
         console.error(err);
@@ -396,7 +408,7 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const { series = "", id = "", download = 0, token } = request.query;
-        const movieLink = await stalkerApi.getMovieLink({
+        const movieLink = await serverManager.getProvider().getMovieLink({
           series,
           id,
           download,
@@ -416,12 +428,12 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const profileId = await getActiveProfileId(); // Get ID
-        const groups = await stalkerApi.getSeriesGroups();
+        const groups = await serverManager.getProvider().getSeriesGroups();
         const filteredChannels = groups.js.filter(
           (channel) => initialConfig.playCensored || channel.censored != 1
         );
         await writeGenres(filteredChannels, "series", profileId); // Write with ID
-        return { success: true, data: filteredChannels };
+        return filteredChannels;
       } catch (err) {
         console.error(err);
         return h
@@ -444,7 +456,18 @@ export const stalkerV2: ServerRoute[] = [
         if (channels.length === 0) {
           return h.redirect("/api/v2/refresh-series-groups");
         }
-        return channels;
+        return {
+          success: true,
+          page: Number(1),
+          pageAtaTime: Number(1),
+          total_items: channels.length,
+          actual_length: channels.length,
+          total_loaded: channels.length,
+          // Sort by number if available, otherwise keep original order
+          data: channels.sort((a, b) => (a.number || 0) - (b.number || 0)),
+          errors: false,
+          isPortal: initialConfig.providerType === 'stalker',
+        };
       } catch (err) {
         console.error(err);
         return h
@@ -461,7 +484,7 @@ export const stalkerV2: ServerRoute[] = [
     path: "/api/v2/channel-link",
     handler: async (request, h) => {
       try {
-        const channelLink = await stalkerApi.getChannelLink(
+        const channelLink = await serverManager.getProvider().getChannelLink(
           request.query.cmd as any
         );
         return channelLink;
@@ -483,14 +506,30 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const cache = await getEpgCache(); // Now handles profileId internally
         if (cache) {
-          return cache; 
+          return cache;
         }
-        const epgData = await fetchAndCacheEpg(); // Now handles profileId internally
-        return epgData; 
+        // const epgData = await fetchAndCacheEpg(); // Now handles profileId internally
+        // return epgData;
+        return []
       } catch (err) {
         console.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve EPG." })
+          .code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v2/expiry",
+    handler: async (request, h) => {
+      try {
+        const expiry = await serverManager.getProvider().getExpiry();
+        return { success: true, expiry };
+      } catch (err) {
+        console.error(err);
+        return h
+          .response({ success: false, error: "Failed to retrieve expiry date." })
           .code(500);
       }
     },

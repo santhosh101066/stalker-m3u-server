@@ -10,7 +10,9 @@ import {
   Programs,
   Video,
 } from "@/types/types";
+import { IProvider } from "@/interfaces/Provider";
 import axios, { AxiosError, AxiosRequestConfig } from "axios";
+import { httpClient } from "@/utils/httpClient";
 import NodeCache from "node-cache";
 import { Token } from "@/models/Token";
 import pLimit from "p-limit";
@@ -25,21 +27,26 @@ async function httpRequest<T = any>(
     method?: string;
     headers?: Record<string, string>;
     timeout?: number;
-  } = { timeout: 20000 }
+  } = { timeout: 120000 }
 ): Promise<T> {
-  return axios
+  return httpClient
     .request<T>({
       url,
       params,
       method: options.method || "GET",
       headers: options.headers,
-      timeout: 30000,
-      validateStatus: (status) => status === 200,
+      timeout: 120000,
     })
-    .then((res) => res.data);
+    .then((res) => {
+      // Maintain original behavior: throw if not 200
+      if (res.status !== 200) {
+        throw new Error(`Request failed with status ${res.status}`);
+      }
+      return res.data;
+    });
 }
 
-export class StalkerAPI {
+export class StalkerAPI implements IProvider {
   private cache = new NodeCache({ stdTTL: 3700, checkperiod: 600 });
   private random: string = "";
   private uid: string = "";
@@ -61,7 +68,7 @@ export class StalkerAPI {
       if (tokenRecord?.token) {
         console.log(`[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`);
         this.cache.set("auth_token", tokenRecord.token, 3600);
-        this.startWatchdog();
+        // this.startWatchdog();
       }
     } catch (err) {
       console.warn("[StalkerAPI] Could not restore token from DB");
@@ -69,9 +76,8 @@ export class StalkerAPI {
   }
 
   getBaseUrl() {
-    return `http://${initialConfig.hostname}:${initialConfig.port}${
-      initialConfig.contextPath != "" ? `/${initialConfig.contextPath}` : ""
-    }`;
+    return `http://${initialConfig.hostname}:${initialConfig.port}${initialConfig.contextPath != "" ? `/${initialConfig.contextPath}` : ""
+      }`;
   }
 
   // Used for Content Requests AND Auth (Dynamic based on context)
@@ -112,11 +118,11 @@ export class StalkerAPI {
       if (!currentToken) return;
 
       const currentTime = new Date().toISOString().split("T")[1].split(".")[0];
-      
+
       // Watchdog usually goes to getPhpUrl() (load.php or portal.php depending on config)
       // kept as getPhpUrl() unless this specifically needs portal.php too.
       // Usually watchdog events come from the load balancer/server script.
-      const res = await axios.get(
+      const res = await httpClient.get(
         `${this.getBaseUrl()}${this.getPhpUrl()}`,
         this._getAxiosRequestConfig(
           {
@@ -211,7 +217,7 @@ export class StalkerAPI {
         "Content-Type": options?.contentType || "application/json",
         Referrer: options?.referrer || this.getBaseUrl(),
       },
-      timeout: 10000,
+      timeout: 120000,
       validateStatus: options?.validateStatus || ((status) => status === 200),
       withCredentials: options?.withCredentials || true,
     };
@@ -275,8 +281,8 @@ export class StalkerAPI {
           }
 
           console.log("Performing full handshake...");
-          this.cache.del("auth_token"); 
-          
+          this.cache.del("auth_token");
+
           const response: any = await this.performHandshake();
 
           if (response?.js?.token) {
@@ -287,7 +293,7 @@ export class StalkerAPI {
             this.updateTokenInDB(newToken);
 
             await this.__refreshToken();
-            
+
             this.isProfileFetching = false;
             return newToken;
           } else {
@@ -313,16 +319,65 @@ export class StalkerAPI {
 
   private async updateTokenInDB(token: string) {
     try {
-        // Keeping only one valid token for simplicity in home use, 
-        // or append if you prefer history.
-        await Token.destroy({ where: {} });
-        await Token.create({ token, isValid: true });
-    } catch(e) { console.error("DB Token update failed", e)}
+      // Keeping only one valid token for simplicity in home use, 
+      // or append if you prefer history.
+      await Token.destroy({ where: {} });
+      await Token.create({ token, isValid: true });
+    } catch (e) { console.error("DB Token update failed", e) }
   }
 
   clearCache() {
     this.cache.del("auth_token");
     this.random = "";
+  }
+
+  async getExpiry(): Promise<string | null> {
+    try {
+      const currentToken = this.cache.get<string>("auth_token");
+      if (!currentToken) {
+        await this.getToken(false);
+      }
+      // We can reuse the logic from __refreshToken or just call get_profile directly
+      // But __refreshToken is private and complex.
+      // Let's make a direct call similar to __refreshToken but returning the date.
+
+      const token = this.cache.get<string>("auth_token");
+      if (!token) return null;
+
+      const profile = await httpRequest(
+        `${this.getBaseUrl()}${this.getPhpUrl()}`,
+        {
+          type: "stb",
+          action: "get_profile",
+          hd: 1,
+          num_banks: 2,
+          stb_type: initialConfig.stbType,
+          sn: initialConfig.serialNumber,
+          mac: initialConfig.mac,
+          token: token,
+          JsHttpRequest: "1-xml",
+        },
+        (() => {
+          const config = this._getAxiosRequestConfig({}, token, {
+            referrer: this.getBaseUrl(),
+          });
+          return {
+            method: config.method,
+            headers: config.headers as Record<string, string>,
+            timeout: config.timeout,
+          };
+        })()
+      );
+
+      if (profile && profile.js && profile.js.expire_billing_date) {
+        return profile.js.expire_billing_date;
+      }
+      return null;
+
+    } catch (e) {
+      console.error("Failed to get expiry:", e);
+      return null;
+    }
   }
 
   private async __refreshToken(secondAuth = 0) {
@@ -392,7 +447,7 @@ export class StalkerAPI {
         await this.__refreshToken(1);
       } else {
         this.cache.ttl("auth_token", 3600);
-        await this.startWatchdog();
+        // await this.startWatchdog();
       }
     } catch (error) {
       console.error(
@@ -409,59 +464,57 @@ export class StalkerAPI {
     isFetch = true,
     loop = false
   ): Promise<T> {
-    
+
     // --- QUEUE LIMITER APPLIED HERE ---
     return requestLimit(async () => {
-        console.log(this.getBaseUrl());
-        
-        let token = this.cache.get<string>("auth_token");
-        if (!token) {
-            token = (await this.getToken(false)) || "";
+      let token = this.cache.get<string>("auth_token");
+      if (!token) {
+        token = (await this.getToken(false)) || "";
+      }
+
+      const url = `${this.getBaseUrl()}${endpoint}`;
+
+      try {
+        const response = await httpRequest(
+          url,
+          { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
+          (() => {
+            const config = this._getAxiosRequestConfig({}, token!, {
+              referrer: this.getBaseUrl(),
+            });
+            return {
+              method: config.method,
+              headers: config.headers as Record<string, string>,
+              timeout: config.timeout,
+            };
+          })()
+        );
+
+        if (
+          (typeof response === "string" && response.startsWith("Authorization failed.")) ||
+          response === "Authorization failed."
+        ) {
+          if (!loop && !this.isProfileFetching) {
+            console.log("Auth failed. Refreshing token and retrying request...");
+            await this.getToken(true);
+            return this.makeRequest(endpoint, params, isFetch, true);
+          }
+          throw new Error("Authorization Failed.");
         }
 
-        const url = `${this.getBaseUrl()}${endpoint}`;
-        
-        try {
-            const response = await httpRequest(
-                url,
-                { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
-                (() => {
-                    const config = this._getAxiosRequestConfig({}, token!, {
-                        referrer: this.getBaseUrl(),
-                    });
-                    return {
-                        method: config.method,
-                        headers: config.headers as Record<string, string>,
-                        timeout: config.timeout,
-                    };
-                })()
-            );
+        return response;
 
-            if (
-                (typeof response === "string" && response.startsWith("Authorization failed.")) ||
-                response === "Authorization failed."
-            ) {
-                if (!loop && !this.isProfileFetching) {
-                    console.log("Auth failed. Refreshing token and retrying request...");
-                    await this.getToken(true);
-                    return this.makeRequest(endpoint, params, isFetch, true);
-                }
-                throw new Error("Authorization Failed.");
-            }
-
-            return response;
-
-        } catch (error: any) {
-            if (axios.isAxiosError(error) && error.response?.status === 401) {
-                if (!loop) {
-                    console.warn("401 detected. Retrying with fresh token...");
-                    this.cache.del("auth_token");
-                    await this.getToken(true);
-                    return this.makeRequest(endpoint, params, isFetch, true);
-                }
-            }
-            throw error;
+      } catch (error: any) {
+        if (axios.isAxiosError(error) && error.response?.status === 401) {
+          if (!loop) {
+            console.warn("401 detected. Retrying with fresh token...");
+            this.cache.del("auth_token");
+            await this.getToken(true);
+            return this.makeRequest(endpoint, params, isFetch, true);
+          }
         }
+        throw error;
+      }
     });
   }
 
@@ -509,19 +562,23 @@ export class StalkerAPI {
     episodeId = 0,
     disableProfile = false,
     search = "",
+    sort,
   }: MoviesApiParams) {
-    const params = {
+    const params: any = {
       type: "vod",
       action: "get_ordered_list",
       category,
       genre: "*",
       p: page,
-      sortby: "added",
+      sortby: sort || "added",
       movie_id: movieId,
       season_id: seasonId,
       episode_id: episodeId,
-      search,
     };
+
+    if (search) {
+      params.search = search;
+    }
 
     return this.makeRequest<Data<Programs<Video>>>(
       this.getPhpUrl(),
@@ -539,27 +596,34 @@ export class StalkerAPI {
     episodeId = 0,
     disableProfile = false,
     search = "",
+    sort,
     ...others
   }: MoviesApiParams) {
+    const params: any = {
+      type: "series",
+      action: "get_ordered_list",
+      category,
+      genre: "*",
+      p: page,
+      sortby: sort || "added",
+      movie_id: movieId,
+      season_id: seasonId,
+      episode_id: episodeId,
+      ...others,
+    };
+
+    if (search) {
+      params.search = search;
+    }
+
     return this.makeRequest<Data<Programs<Video>>>(
       this.getPhpUrl(),
-      {
-        type: "series",
-        action: "get_ordered_list",
-        category,
-        genre: "*",
-        p: page,
-        sortby: "added",
-        movie_id: movieId,
-        season_id: seasonId,
-        episode_id: episodeId,
-        search,
-        ...others,
-      },
+      params,
       true,
       false
     );
   }
+
 
   async getMovieLink({
     series,

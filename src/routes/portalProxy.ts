@@ -15,7 +15,6 @@ export const portalProxy: ServerRoute[] = [
 
       const decodedUrl = Buffer.from(url, "base64").toString("utf-8");
       const client = decodedUrl.startsWith("https") ? https : http;
-      console.log(decodedUrl);
       
 
       return new Promise((resolve, reject) => {

@@ -6,7 +6,7 @@ import {
 } from "@/types/types";
 import { initialConfig } from "@/config/server";
 import { readChannels, readGenres } from "./storage";
-import { stalkerApi } from "./stalker";
+import { serverManager } from "@/serverManager";
 
 function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
   return {
@@ -73,7 +73,7 @@ export async function getM3uV2(host: string) {
 
 export async function getEPGV2() {
   const genres = await readGenres("channel");
-  const allPrograms = await stalkerApi.getChannels();
+  const allPrograms = await serverManager.getProvider().getChannels();
   const channels = (allPrograms.js.data ?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
     return genre && initialConfig.groups.includes(genre.title);
@@ -103,7 +103,7 @@ export async function getEPGV2() {
   await Promise.all(
     channels.map(async (channel) => {
       try {
-        const epg = await stalkerApi.getEPG(channel.id);
+        const epg = await serverManager.getProvider().getEPG(channel.id);
         if (epg?.js) {
           epg.js.forEach((program) => {
             xmltv += `  <programme start="${formatTimestamp(

@@ -1,5 +1,5 @@
 import { readChannels, readGenres, readEpgCache, writeEpgCache } from "./storage";
-import { stalkerApi } from "./stalker";
+import { serverManager } from "@/serverManager";
 import { Channel, EPG_List, Genre } from "@/types/types";
 import { initialConfig } from "@/config/server";
 import { ConfigProfile } from "@/models/ConfigProfile"; // Import ConfigProfile
@@ -43,14 +43,14 @@ export async function getEpgCache(): Promise<EpgCache | null> {
  */
 export async function fetchAndCacheEpg(): Promise<EpgCache> {
   console.log("Fetching fresh EPG data...");
-  
+
   // --- NEW: Get Active Profile ID ---
   const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
   const profileId = activeProfile?.id;
   // ----------------------------------
 
   // Pass profileId to reads
-  const channels = await readChannels(profileId); 
+  const channels = await readChannels(profileId);
   const genres = await readGenres("channel", profileId);
 
   // Filter channels based on the user's config
@@ -61,7 +61,7 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
 
   // Fetch EPG for all filtered channels in parallel
   const promises = filteredChannels.map((channel) =>
-    stalkerApi.getEPG(channel.id).then(
+    serverManager.getProvider().getEPG(channel.id).then(
       (epg) => ({
         id: channel.id,
         epg: epg.js || [], // Ensure epg.js is an array

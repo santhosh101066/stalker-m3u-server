@@ -25,6 +25,9 @@ export interface Config extends BaseConfig {
   tokens: string[];
   proxy: boolean;
   playCensored: boolean;
+  providerType?: 'stalker' | 'xtream';
+  username?: string;
+  password?: string;
 }
 
 export type VodOrdering = "none" | "rating" | "alphabetic";
@@ -89,6 +92,12 @@ export interface Video extends Program {
   category_id: string;
   time: number;
   rating_imdb: string;
+  runtime?: number;
+  series?: number[];
+  is_episode?: number;
+  is_series?: number;
+  series_number?: number;
+  episode_number?: number;
 }
 
 export interface Serie extends Program {
@@ -190,7 +199,7 @@ export interface Serie extends Program {
 }
 
 export interface MoviesApiParams {
-  category: number;
+  category: number | string;
   page: number;
   movieId?: number;
   seasonId?: number;
@@ -198,6 +207,7 @@ export interface MoviesApiParams {
   disableProfile?: boolean;
   search?: string;
   token?: string;
+  sort?: string;
 }
 
 export interface ConfigProfileData {

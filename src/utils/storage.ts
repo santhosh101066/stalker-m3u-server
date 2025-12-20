@@ -91,6 +91,7 @@ export async function writeGenres(
     // Insert new genres
     const genresToInsert = genres.map((genre) => ({
       ...genre,
+      id: `${type}_${genre.id}`, // Prefix ID with type to avoid collision
       type,
       profileId: profileId !== undefined ? profileId : null,
     }));
@@ -116,7 +117,11 @@ export async function readGenres(
       },
       raw: true,
     });
-    return genres;
+    // Strip the prefix when reading back so the app sees original IDs
+    return genres.map(g => ({
+      ...g,
+      id: g.id.replace(`${type}_`, '')
+    }));
   } catch (error) {
     console.error(`Error reading ${type} genres from database:`, error);
     return [];

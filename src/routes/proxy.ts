@@ -1,5 +1,5 @@
 import { ServerRoute, Request, ResponseToolkit } from "@hapi/hapi";
-import axios from "axios";
+import { httpClient } from "@/utils/httpClient";
 import http from "http";
 import https, { RequestOptions } from "https";
 
@@ -28,6 +28,54 @@ export function getProxiedUrl(url: string, referer?: string): string {
 
 
 // ==== Hapi routes ==== 
+
+// Reusable streaming handler
+export async function handleProxyStream(request: any, h: any, decodedUrl: string, referer?: string) {
+  // Pass essential headers from the client to the upstream server
+  const requestHeaders: Record<string, string | undefined> = {
+    'Referer': referer, // Only use the explicitly passed referer, not the browser's
+    'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16', // Mimic VLC
+    'Accept': '*/*', // Accept everything
+    // 'Accept-Encoding': request.headers['accept-encoding'], // Let axios handle this or default
+  };
+  if (request.headers.range) {
+    requestHeaders['Range'] = request.headers.range;
+  }
+
+  const response = await httpClient.get(decodedUrl, {
+    responseType: 'stream',
+    headers: requestHeaders,
+  });
+
+  const stream = response.data as http.IncomingMessage;
+  const hapiResponse = h.response(stream).code(response.status);
+
+  // Copy critical headers from the upstream response to the client
+  // Explicitly DO NOT copy 'content-encoding' as axios handles decompression
+  const headersToCopy = [
+    'content-type',
+    'content-length',
+    'accept-ranges',
+    'content-range',
+    'date',
+    'last-modified',
+    'etag',
+  ];
+
+  for (const [key, value] of Object.entries(response.headers)) {
+    if (value && headersToCopy.includes(key.toLowerCase())) {
+      hapiResponse.header(key, value.toString());
+    }
+  }
+
+  // Add CORS headers
+  hapiResponse.header('Access-Control-Allow-Origin', '*');
+  hapiResponse.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  hapiResponse.header('Access-Control-Allow-Headers', 'Content-Type, Range');
+
+  return hapiResponse;
+}
+
 export const proxy: ServerRoute[] = [
   {
     method: 'GET',
@@ -44,54 +92,7 @@ export const proxy: ServerRoute[] = [
           ? Buffer.from(ref, 'base64').toString('utf-8')
           : undefined;
 
-        // --- MODIFICATION START ---
-        // Pass essential headers from the client to the upstream server
-        const requestHeaders: Record<string, string | undefined> = {
-          'Referer': referer,
-          'User-Agent': request.headers['user-agent'],
-          'Accept': request.headers['accept'],
-          'Accept-Encoding': request.headers['accept-encoding'], // Pass client's encoding preference
-        };
-        if (request.headers.range) {
-          requestHeaders['Range'] = request.headers.range;
-        }
-        // --- MODIFICATION END ---
-
-        const response = await axios.get(decodedUrl, {
-          responseType: 'stream',
-          headers: requestHeaders,
-          validateStatus: () => true,
-        });
-
-        const stream = response.data as http.IncomingMessage;
-        const hapiResponse = h.response(stream).code(response.status);
-
-        // --- MODIFICATION START ---
-        // Copy critical headers from the upstream response to the client
-        // Explicitly DO NOT copy 'content-encoding' as axios handles decompression
-        const headersToCopy = [
-          'content-type',
-          'content-length',
-          'accept-ranges',
-          'content-range',
-          'date',
-          'last-modified',
-          'etag',
-        ];
-
-        for (const [key, value] of Object.entries(response.headers)) {
-          if (value && headersToCopy.includes(key.toLowerCase())) {
-            hapiResponse.header(key, value.toString());
-          }
-        }
-        // --- MODIFICATION END ---
-
-        // Add CORS headers
-        hapiResponse.header('Access-Control-Allow-Origin', '*');
-        hapiResponse.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
-        hapiResponse.header('Access-Control-Allow-Headers', 'Content-Type, Range');
-
-        return hapiResponse;
+        return await handleProxyStream(request, h, decodedUrl, referer);
       } catch (error: any) {
         console.error('[/proxy/stream] error:', error.message || error);
         if (error.response) {
@@ -123,10 +124,25 @@ export const proxy: ServerRoute[] = [
         const headers: Record<string, string> = {};
         if (referer) headers["Referer"] = referer;
 
-        const resp = await axios.get<string>(playlistUrl, {
+        // --- SMART PROXY LOGIC ---
+        // 1. Check Content-Type via HEAD request first
+        try {
+          const headRes = await httpClient.head(playlistUrl, { headers });
+          const contentType = headRes.headers['content-type'] || '';
+
+          // If it looks like a video or binary stream, use the streaming handler directly
+          if (contentType.includes('video/') || contentType.includes('application/octet-stream')) {
+            console.log(`[SmartProxy] Detected binary content (${contentType}), streaming directly.`);
+            return await handleProxyStream(request, h, playlistUrl, referer);
+          }
+        } catch (headErr) {
+          console.warn("[SmartProxy] HEAD request failed, falling back to GET", headErr);
+        }
+
+        // 2. If not binary, fetch as text (assuming playlist)
+        const resp = await httpClient.get<string>(playlistUrl, {
           responseType: "text",
           headers,
-          validateStatus: () => true,
         });
 
         if (resp.status < 200 || resp.status >= 300) {
@@ -134,12 +150,21 @@ export const proxy: ServerRoute[] = [
         }
 
         const body = resp.data || "";
+
+        const finalUrl = resp.request?.res?.responseUrl || playlistUrl;
+
+        // 3. Double check content if HEAD failed or lied
         if (!body.startsWith("#EXTM3U")) {
+          // If it doesn't look like a playlist, maybe it's a text-based error or something else.
+          // But if we are here, we probably expected a playlist. 
+          // If it's actually binary data that axios tried to read as text, 'body' might be garbage.
+          // Ideally we should have caught this with Content-Type.
+          // For now, return as plain text.
           return h.response(body).type("text/plain");
         }
 
-        // --- NEW REWRITE LOGIC ---
-        
+        // --- REWRITE LOGIC (Existing) ---
+
         // Regex to find:
         // 1. URI="([^"]+)" (captures the URL in group 2)
         // 2. A line that is not a tag and not empty (captures the URL in group 3)
@@ -152,7 +177,7 @@ export const proxy: ServerRoute[] = [
             const urlToRewrite = uriValue || segmentUrl;
             if (!urlToRewrite) return match;
 
-            const absolute = new URL(urlToRewrite, playlistUrl).href;
+            const absolute = new URL(urlToRewrite, finalUrl).href;
             const b64url = Buffer.from(absolute).toString("base64");
             const b64ref = referer
               ? Buffer.from(referer).toString("base64")
@@ -178,7 +203,7 @@ export const proxy: ServerRoute[] = [
             }
           }
         );
-        // --- END NEW LOGIC ---
+        // --- END REWRITE LOGIC ---
 
         return h
           .response(rewritten)
@@ -190,6 +215,4 @@ export const proxy: ServerRoute[] = [
       }
     },
   },
-
-  
 ];

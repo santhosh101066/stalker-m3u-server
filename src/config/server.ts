@@ -21,6 +21,9 @@ const ConfigDefault: Config = {
   proxy: false,
   tokens: [],
   playCensored: false,
+  providerType: 'stalker',
+  username: 'user',
+  password: 'password',
 };
 
 const AppConfigDefault: AppConfig = {
@@ -75,9 +78,9 @@ export async function loadActiveProfileFromDB() {
     if (activeProfile) {
       // --- KEY CHANGE: Update properties of the existing object ---
       Object.assign(initialConfig, activeProfile.config);
-      
+
       console.log(`✅ Loaded active profile: "${activeProfile.name}"`);
-      
+
       const tokens = await Token.findAll();
       initialConfig.tokens = tokens.map(t => t.token);
       console.log(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
@@ -97,7 +100,7 @@ export async function switchProfile(profileId: number) {
     if (!profile.isEnabled) throw new Error(`Profile "${profile.name}" is disabled.`);
 
     await ConfigProfile.update({ isActive: false }, { where: {} });
-    
+
     profile.isActive = true;
     await profile.save();
 
