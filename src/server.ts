@@ -14,9 +14,11 @@ import { portalProxy } from "./routes/portalProxy";
 import { xtreamRoutes } from "./routes/xtream";
 import { streamRoutes } from "./routes/stream";
 import { vodRoutes } from "./routes/vod"; // Import vodRoutes
+import { socketService } from "./services/SocketService";
 
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
+import { logger } from "./utils/logger";
 
 const init = async () => {
   await initDB();
@@ -36,6 +38,10 @@ const init = async () => {
   });
 
   serverManager.setServer(server);
+
+  // Initialize Socket.io
+  socketService.init(server.listener);
+
   await server.register(Inert);
   server.route(playlistRoutes);
   server.route(liveRoutes);
@@ -74,9 +80,9 @@ const init = async () => {
     },
   });
 
+
   server.events.on("response", function (request) {
-    console.log(
-      ["debug"],
+    logger.info(
       request.info.remoteAddress +
       ": " +
       request.method.toUpperCase() +

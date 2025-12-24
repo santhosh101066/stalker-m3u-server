@@ -317,6 +317,20 @@ export class StalkerAPI implements IProvider {
     }
   }
 
+  async fetchNewToken() {
+    try {
+      console.log("Forcing fetch of NEW token via handshake...");
+      // remove current token to force fresh handshake
+      this.cache.del("auth_token");
+      // call getToken with refresh=true logic implicit in cache deletion
+      const token = await this.getToken(true);
+      return { token };
+    } catch (error) {
+      console.error("fetchNewToken failed:", error);
+      return { token: null, error };
+    }
+  }
+
   private async updateTokenInDB(token: string) {
     try {
       // Keeping only one valid token for simplicity in home use, 

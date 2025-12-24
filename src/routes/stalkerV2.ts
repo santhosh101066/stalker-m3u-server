@@ -11,6 +11,7 @@ import { serverManager } from "@/serverManager";
 import { Genre, Channel, EPG_List } from "@/types/types";
 import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
 import { ConfigProfile } from "@/models/ConfigProfile"; // Import ConfigProfile
+import { stalkerApi } from "@/utils/stalker";
 
 // Helper to get active profile ID
 const getActiveProfileId = async () => {
@@ -530,6 +531,60 @@ export const stalkerV2: ServerRoute[] = [
         console.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve expiry date." })
+          .code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v2/get-token",
+    handler: async (request, h) => {
+      try {
+        const tokenResponse = await stalkerApi.fetchNewToken();
+        if (tokenResponse && tokenResponse.token) {
+          stalkerApi.addToken(tokenResponse.token);
+
+          // Persist to active profile if needed (optional, as addToken updates memory/config)
+          // But best to ensure DB is in sync
+          const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+          if (activeProfile) {
+            activeProfile.config.tokens = initialConfig.tokens;
+            activeProfile.changed('config', true);
+            await activeProfile.save();
+          }
+
+          return { success: true, token: tokenResponse.token };
+        }
+        return h.response({ success: false, error: "Failed to fetch token" }).code(500);
+      } catch (err) {
+        console.error("Error fetching new token:", err);
+        return h
+          .response({ success: false, error: "Failed to fetch new token." })
+          .code(500);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v2/clear-tokens",
+    handler: async (request, h) => {
+      try {
+        // Clear locally
+        initialConfig.tokens = [];
+
+        // Update DB
+        const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+        if (activeProfile) {
+          activeProfile.config.tokens = [];
+          activeProfile.changed('config', true);
+          await activeProfile.save();
+        }
+
+        return { success: true, message: "All tokens cleared." };
+      } catch (err) {
+        console.error("Error clearing tokens:", err);
+        return h
+          .response({ success: false, error: "Failed to clear tokens." })
           .code(500);
       }
     },
