@@ -3,7 +3,7 @@ node_modules/
 
 # Environment files
 .env
-.env.local
+!.env.example
 
 # Happi API Configuration
 happi.config.js

@@ -1,119 +1,101 @@
-# Stalker M3U Server
+<p align="center">
+  <img src="public/stalker-logo.svg" alt="Stalker Server Logo" width="200" />
+</p>
 
-## Project Description
+<h1 align="center">Stalker Middleware Server</h1>
 
-This project appears to be a server designed to generate and manage M3U playlists, likely integrating with Stalker Middleware or similar IPTV portal systems. It provides various routes for generating playlists, handling live streams, media, and proxying requests.
+<p align="center">
+  A robust Node.js backend for proxying Stalker/Xtream Codes credentials, generating M3U playlists, 
+  and handling real-time signaling for the Stalker VOD ecosystem.
+</p>
 
-## Features
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js-20-green?style=for-the-badge&logo=nodedotjs" />
+  <img src="https://img.shields.io/badge/Docker-Enabled-blue?style=for-the-badge&logo=docker" />
+  <img src="https://img.shields.io/badge/TypeScript-5-blue?style=for-the-badge&logo=typescript" />
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
+</p>
 
-- **M3U Playlist Generation:** Dynamically generates M3U playlists.
-- **Live Stream Handling:** Routes for managing and serving live content.
-- **Media Management:** Handles various media types.
-- **Portal Proxy:** Functionality to proxy requests to a Stalker portal.
-- **Configuration:** Customizable through `appConfig.json` and `src/config/server.ts`.
-- **Web Interface:** A basic web interface served from the `public` directory.
+---
 
-## Technologies Used
+## ✨ Features
 
-- **TypeScript:** Primary language for server-side logic.
-- **Node.js:** Runtime environment.
-- **Express.js (inferred):** Likely used for routing and server management (based on `src/routes` and `src/server.ts`).
-- **TSUP:** For bundling and compiling TypeScript.
+- 🔄 **Smart Proxy**: Securely proxies video streams, hiding upstream credentials from the client.
+- 📋 **Playlist Generation**: Dynamically converts Stalker portal content into standard M3U playlists.
+- 📺 **EPG Support**: Parses and serves Electronic Program Guides (EPG) for live channels.
+- 🔌 **Real-time Signaling**: Socket.io server for handling device casting and remote control commands.
+- 🐳 **Docker Ready**: Fully containerized for easy deployment on Raspberry Pi or any Linux server.
 
-## Setup and Installation
+## 🚀 Quick Start
 
-To set up the project locally, follow these steps:
+### Prerequisites
+- Node.js (v18+)
+- Docker (for deployment)
 
-1.  **Clone the repository:**
+### Installation
+
+1.  **Clone the repository**
     ```bash
-    git clone https://github.com/your-username/stalker-m3u-server.git
+    git clone https://github.com/yourusername/stalker-m3u-server.git
     cd stalker-m3u-server
     ```
 
-2.  **Install dependencies:**
+2.  **Install dependencies**
     ```bash
     npm install
     ```
 
-3.  **Configure the server:**
-    - Copy `config copy.json` to `appConfig.json` (if it doesn't exist) and update the necessary settings.
-    - Review and modify `src/config/server.ts` for server-specific configurations.
-
-4.  **Build the project:**
+3.  **Configure Environment**
     ```bash
-    npm run build # or tsup
+    cp .env.example .env
+    ```
+    Edit `.env` to configure your deployment target:
+    ```ini
+    REMOTE_HOST=your_raspberry_pi_ip
+    REMOTE_USER=pi
+    REMOTE_DIR=~/stalker-server
     ```
 
-5.  **Run the server:**
+4.  **Run Development Server**
     ```bash
-    npm start # or node dist/server.js
-    ```
-    Alternatively, you can use the provided `run.sh` script:
-    ```bash
-    ./run.sh
+    npm run dev
     ```
 
-## Usage
+## 🛠️ Deployment
 
-Once the server is running, you can access its functionalities via the defined API routes and the web interface.
+We use a consolidated `deploy.sh` script to manage the Docker lifecycle on your remote host.
 
-- **Web Interface:** Open your browser and navigate to `http://localhost:PORT` (replace `PORT` with the port configured in `appConfig.json` or `src/config/server.ts`).
-- **API Endpoints:** Refer to the `src/routes` directory for available API endpoints like `/generate`, `/live`, `/media`, `/playlist`, `/portalProxy`, `/proxy`, and `/stalkerV2`.
-
-## Configuration
-
-- `appConfig.json`: Contains general application settings.
-- `src/config/server.ts`: Contains server-specific configurations, such as port numbers, API keys, or other sensitive information.
-
-## Project Structure
-
+### Full Deployment
+Builds the Docker image, saves it, transfers it to the remote host, and restarts the container.
+```bash
+./deploy.sh
 ```
-.gitignore
-appConfig.json
-commands
-config copy.json
-Dockerfile
-package-lock.json
-package.json
-readme.md
-run.sh
-tsconfig.json
-tsup.config.ts
-.git/...
-.mem/...
-dist/...
-node_modules/...
-public/
-│   index.html
-│   stalker-vod-logo.svg
-│   assets/
-│       index-BBjfWDij.js
-│       index-DT37Duqs.css
-src/
-    server.ts
-    serverManager.ts
-    .mem/...
-    config/
-    │   server.ts
-    constants/
-    │   common.ts
-    │   timeouts.ts
-    routes/
-    │   config.ts
-    │   generate.ts
-    │   live.ts
-    │   media.ts
-    │   playlist.ts
-    │   portalProxy.ts
-    │   proxy.ts
-    │   stalkerV2.ts
-    types/
-    │   types.ts
-    utils/
-        cmdPlayer.ts
-        fetch.ts
-        generateGroups.ts
-        getM3uUrls.ts
-        stalker.ts
-        storage.ts
-```
+
+### Management Commands
+- **Restart Container**:
+  ```bash
+  ./deploy.sh restart
+  ```
+- **View Logs**:
+  ```bash
+  ./deploy.sh logs
+  ```
+
+## 📡 API Endpoints
+
+- `GET /api/playlist/m3u`: Generate M3U playlist for authenticated user.
+- `GET /api/epg`: Retrieve EPG data.
+- `GET /live/*`: Proxy endpoint for live streams.
+- `GET /movie/*`: Proxy endpoint for VOD content.
+
+## ⚠️ Disclaimer
+
+This server acts as a **middleware proxy only**. It does not host, provide, or distribute any media content or playlists. It is designed to interface with existing, user-provided Stalker or Xtream Codes portals. Users are solely responsible for ensuring they have the legal right to access the content they configure.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
+
+Distributed under the MIT License. See `LICENSE` for more information.

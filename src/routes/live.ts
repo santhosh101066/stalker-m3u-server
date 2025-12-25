@@ -141,7 +141,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       }
       if (res.status < 200 || res.status >= 300 || !res.data) {
         return h.response({ error: `Upstream Error ${res.status}` }).code(res.status);
-      }
+      }      
       return res;
     };
 
