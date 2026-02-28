@@ -141,7 +141,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       }
       if (res.status < 200 || res.status >= 300 || !res.data) {
         return h.response({ error: `Upstream Error ${res.status}` }).code(res.status);
-      }      
+      }
       return res;
     };
 
@@ -230,8 +230,18 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       cache.set(cmd, record as CacheRecord);
       return h.response(modifiedLines.join("\n")).type("application/vnd.apple.mpegurl");
     }
-  } catch (error) {
+  } catch (error: any) {
+    const message = error.message || String(error);
     logger.error(`Error: ${(error as Error)?.stack ?? error}`);
+
+    if (axios.isAxiosError(error) && error.response) {
+      return h.response({ error: "Upstream Error" }).code(error.response.status);
+    }
+
+    if (message.includes("Stream Not Found") || message.includes("404")) {
+      return h.response({ error: "Stream Not Found" }).code(404);
+    }
+
     return h.response({ error: "Failed to generate URL" }).code(500);
   }
 }

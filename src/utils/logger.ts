@@ -1,7 +1,12 @@
 import pino from 'pino';
 import { appConfig } from '@/config/server';
 
-import { socketService } from '@/services/SocketService';
+// Circular dependency breaker: SocketService will register itself here
+let broadcastLogFn: ((level: string, message: string, timestamp: string) => void) | null = null;
+
+export const setLogBroadcaster = (fn: (level: string, message: string, timestamp: string) => void) => {
+  broadcastLogFn = fn;
+};
 
 const pinoLogger = pino({
   level: appConfig.app.logLevel || 'info',
@@ -17,6 +22,8 @@ const pinoLogger = pino({
 
 const logToSocket = (level: string, args: any[]) => {
   try {
+    if (!broadcastLogFn) return;
+
     let message = '';
     if (args.length > 0) {
       if (typeof args[0] === 'string') {
@@ -33,7 +40,7 @@ const logToSocket = (level: string, args: any[]) => {
         message = String(args[0]);
       }
     }
-    socketService.broadcastLog(level, message, new Date().toISOString());
+    broadcastLogFn(level, message, new Date().toISOString());
   } catch (err) {
     // Ignore socket errors during logging to prevent loop
   }
@@ -45,8 +52,16 @@ export const logger = new Proxy(pinoLogger, {
       const original = target[prop as keyof typeof target];
       if (typeof original === 'function') {
         return (...args: any[]) => {
+          // 1. Log to console/file first (pino)
+          const result = (original as Function).apply(target, args);
+          // 2. Then broadcast to socket (if registered)
+          // We do NOT log to socket here if the log came FROM SocketService to avoid loop? 
+          // Actually, the loop was: logger -> socketService -> console.log -> logger ...
+          // Now: logger -> socketService.broadcast -> emit.
+          // If SocketService uses logger, it goes: SocketService -> logger -> pino (console) -> logToSocket -> broadcastFn -> emit.
+          // This is fine as long as `broadcastFn` (Socket.emit) does NOT call logger.
           logToSocket(prop, args);
-          return (original as Function).apply(target, args);
+          return result;
         };
       }
     }

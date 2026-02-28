@@ -7,6 +7,10 @@ export const serverConfig = {
   port: 3000,
   routes: {
     cors: { origin: ["*"] },
+    state: {
+      parse: false, // Disable automatic strict parsing of cookies
+      failAction: 'ignore' as const // Ignore errors if parsing fails
+    }
   },
 };
 
@@ -26,6 +30,13 @@ const ConfigDefault: Config = {
   password: 'password',
 };
 
+const proxySecret = process.env.PROXY_SECRET;
+if (process.env.NODE_ENV === 'production' && !proxySecret) {
+  throw new Error("FATAL: PROXY_SECRET environment variable is required in production mode.");
+} else if (!proxySecret) {
+  console.warn("WARNING: PROXY_SECRET not set, using insecure default.");
+}
+
 const AppConfigDefault: AppConfig = {
   api: {
     timeout: Number(process.env.API_TIMEOUT) || 5000,
@@ -37,7 +48,7 @@ const AppConfigDefault: AppConfig = {
     logLevel: process.env.LOG_LEVEL || "info"
   },
   proxy: {
-    secretKey: process.env.PROXY_SECRET || "default-secret-key-please-change"
+    secretKey: proxySecret || "default-secret-key-please-change"
   }
 };
 

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { initialConfig, serverConfig } from "@/config/server";
 import { playlistRoutes } from "./routes/playlist";
 import { liveRoutes } from "./routes/live";
@@ -29,8 +30,7 @@ const init = async () => {
   // Load active profile configuration
   await loadActiveProfileFromDB();
 
-  // Re-initialize provider with loaded config
-  serverManager.initProvider();
+
 
   // Register routes
   const server = Hapi.server({
@@ -38,6 +38,15 @@ const init = async () => {
   });
 
   serverManager.setServer(server);
+
+  // --- FIX: Specific Route for Root to serve index.html ---
+  server.route({
+    method: "GET",
+    path: "/",
+    handler: (request, h) => {
+      return h.file(path.join(process.cwd(), "public", "index.html"));
+    },
+  });
 
   // Initialize Socket.io
   socketService.init(server.listener);
@@ -120,11 +129,11 @@ const init = async () => {
   // }
 
   // scheduleTokenFetcher();
-  console.log(`Server running at: ${server.info.uri}`);
+  logger.info(`Server running at: ${server.info.uri}`);
 };
 
 process.on("unhandledRejection", (err) => {
-  console.error("Unhandled rejection:", err);
+  logger.error(`Unhandled rejection: ${err}`);
   process.exit(1);
 });
 

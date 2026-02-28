@@ -1,6 +1,7 @@
 
 import { Server as SocketIOServer, Socket } from "socket.io";
 import { Server } from "http";
+import { logger, setLogBroadcaster } from "@/utils/logger";
 
 interface Device {
     id: string;
@@ -22,8 +23,13 @@ class SocketService {
             },
         });
 
+        // Register this service as the log broadcaster
+        setLogBroadcaster((level, message, timestamp) => {
+            this.broadcastLog(level, message, timestamp);
+        });
+
         this.io.on("connection", (socket: Socket) => {
-            console.log(`[Socket] New connection: ${socket.id}`);
+            logger.info(`[Socket] New connection: ${socket.id}`);
 
             socket.on("register", (data: { id: string; name: string; type: 'receiver' | 'controller' }) => {
                 const device: Device = {
@@ -34,7 +40,7 @@ class SocketService {
                     ip: socket.handshake.address,
                 };
                 this.devices.set(socket.id, device);
-                console.log(`[Socket] Device registered: ${device.name} (${device.type})`);
+                logger.info(`[Socket] Device registered: ${device.name} (${device.type})`);
 
                 // Broadcast updated list to all controllers
                 this.broadcastReceivers();
@@ -47,21 +53,21 @@ class SocketService {
             socket.on("cast_command", (data: { targetDeviceId: string; command: string; payload: any }) => {
                 const targetSocketId = this.findSocketIdByDeviceId(data.targetDeviceId);
                 if (targetSocketId) {
-                    console.log(`[Socket] Forwarding command '${data.command}' to ${data.targetDeviceId}`);
+                    logger.info(`[Socket] Forwarding command '${data.command}' to ${data.targetDeviceId}`);
                     this.io?.to(targetSocketId).emit("receive_cast_command", {
                         command: data.command,
                         payload: data.payload,
                         from: this.devices.get(socket.id)?.name || "Unknown Controller",
                     });
                 } else {
-                    console.warn(`[Socket] Target device ${data.targetDeviceId} not found`);
+                    logger.warn(`[Socket] Target device ${data.targetDeviceId} not found`);
                 }
             });
 
             socket.on("disconnect", () => {
                 const device = this.devices.get(socket.id);
                 if (device) {
-                    console.log(`[Socket] Device disconnected: ${device.name}`);
+                    logger.info(`[Socket] Device disconnected: ${device.name}`);
                     this.devices.delete(socket.id);
                     if (device.type === 'receiver') {
                         this.broadcastReceivers();
@@ -79,7 +85,7 @@ class SocketService {
             });
         });
 
-        console.log("[Socket] Service initialized");
+        logger.info("[Socket] Service initialized");
     }
 
     private getReceivers(): Device[] {
@@ -99,6 +105,7 @@ class SocketService {
     }
 
     public broadcastLog(level: string, message: string, timestamp: string) {
+        // Direct emit, do NOT use logger here to avoid recursion
         this.io?.to("logging").emit("server_log", { level, message, timestamp });
     }
 }

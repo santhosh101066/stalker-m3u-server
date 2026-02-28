@@ -1,8 +1,9 @@
 import { Server } from "@hapi/hapi";
 import { IProvider } from "@/interfaces/Provider";
-import { StalkerAPI } from "@/utils/stalker";
+import { stalkerApi } from "@/utils/stalker";
 import { XtreamClient } from "@/utils/xtream-client";
 import { initialConfig, loadActiveProfileFromDB } from "@/config/server";
+import { logger } from "@/utils/logger";
 
 class ServerManager {
     private static instance: ServerManager;
@@ -22,10 +23,11 @@ class ServerManager {
     initProvider() {
         if (initialConfig.providerType === 'xtream') {
             this.provider = new XtreamClient();
-            console.log("Initialized Xtream Codes Provider");
+            logger.info("Initialized Xtream Codes Provider");
         } else {
-            this.provider = new StalkerAPI();
-            console.log("Initialized Stalker Provider");
+            // Use the singleton instance
+            this.provider = stalkerApi;
+            logger.info("Initialized Stalker Provider");
         }
     }
 
@@ -52,9 +54,9 @@ class ServerManager {
             // Re-init provider on restart to pick up config changes
             this.initProvider();
             await this.server.start();
-            console.log('Server successfully restarted');
+            logger.info('Server successfully restarted');
         } catch (error) {
-            console.error('Failed to restart server:', error);
+            logger.error(`Failed to restart server: ${error}`);
             throw error;
         }
     }

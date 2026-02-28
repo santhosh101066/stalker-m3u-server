@@ -16,6 +16,7 @@
     "@hapi/inert": "^7.1.0",
     "axios": "^1.9.0",
     "crypto": "^1.0.1",
+    "dotenv": "^17.3.1",
     "follow-redirects": "^1.15.9",
     "module-alias": "^2.2.3",
     "node-cache": "^5.1.2",

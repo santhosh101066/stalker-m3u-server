@@ -2,6 +2,7 @@ import { ServerRoute } from "@hapi/hapi";
 import { serverManager } from "@/serverManager";
 import axios from "axios";
 import { hlsTranscoder } from "@/utils/hls-transcoder";
+import { logger } from "@/utils/logger";
 
 export const vodRoutes: ServerRoute[] = [
     {
@@ -23,7 +24,7 @@ export const vodRoutes: ServerRoute[] = [
                     const linkResult = await serverManager.getProvider().getChannelLink(cmd);
                     streamUrl = linkResult?.js?.cmd;
                 } catch (e) {
-                    console.error("Error resolving stream URL:", e);
+                    logger.error(`Error resolving stream URL: ${e}`);
                 }
             }
 
@@ -31,7 +32,7 @@ export const vodRoutes: ServerRoute[] = [
                 return h.response({ error: "Could not resolve stream URL" }).code(404);
             }
 
-            console.log(`[VOD Proxy] Streaming: ${streamUrl}`);
+            logger.info(`[VOD Proxy] Streaming: ${streamUrl}`);
 
             // Headers to send to the source
             const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
@@ -43,7 +44,7 @@ export const vodRoutes: ServerRoute[] = [
             // Forward Range header if present
             if (request.headers.range) {
                 headers['Range'] = request.headers.range;
-                console.log(`[VOD Proxy] Forwarding Range: ${request.headers.range}`);
+                logger.info(`[VOD Proxy] Forwarding Range: ${request.headers.range}`);
             }
 
             try {
@@ -82,7 +83,7 @@ export const vodRoutes: ServerRoute[] = [
                 return proxyResponse;
 
             } catch (error: any) {
-                console.error(`[VOD Proxy] Error: ${error.message}`);
+                logger.error(`[VOD Proxy] Error: ${error.message}`);
                 return h.response({ error: "Stream proxy failed" }).code(502);
             }
         },

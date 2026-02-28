@@ -16,6 +16,7 @@ import { httpClient } from "@/utils/httpClient";
 import NodeCache from "node-cache";
 import { Token } from "@/models/Token";
 import pLimit from "p-limit";
+import { logger } from "@/utils/logger";
 
 // Limit concurrent requests to the Portal to 5 at a time
 const requestLimit = pLimit(5);
@@ -66,12 +67,12 @@ export class StalkerAPI implements IProvider {
     try {
       const tokenRecord = await Token.findOne({ where: { isValid: true } });
       if (tokenRecord?.token) {
-        console.log(`[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`);
+        logger.info(`[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`);
         this.cache.set("auth_token", tokenRecord.token, 3600);
         // this.startWatchdog();
       }
     } catch (err) {
-      console.warn("[StalkerAPI] Could not restore token from DB");
+      logger.warn("[StalkerAPI] Could not restore token from DB");
     }
   }
 
@@ -90,7 +91,7 @@ export class StalkerAPI implements IProvider {
       return;
     }
     this.watchdogStarted = true;
-    console.log(`[Watchdog] Starting service with ${interval}s interval...`);
+    logger.info(`[Watchdog] Starting service with ${interval}s interval...`);
 
     // Run once immediately to establish state
     await this.runWatchdogCheck(true);
@@ -103,7 +104,7 @@ export class StalkerAPI implements IProvider {
 
   setActiveChannel(channelId: string) {
     this.activeChannelId = channelId;
-    console.log(`[Watchdog] Active channel ID updated to: ${channelId}`);
+    logger.info(`[Watchdog] Active channel ID updated to: ${channelId}`);
   }
 
   runWatchdogCheck = async (init = false) => {
@@ -111,7 +112,7 @@ export class StalkerAPI implements IProvider {
       let currentToken = this.cache.get<string>("auth_token");
 
       if (!currentToken) {
-        console.log("[Watchdog] Token missing, fetching new token...");
+        logger.info("[Watchdog] Token missing, fetching new token...");
         currentToken = (await this.getToken(false)) || "";
       }
 
@@ -145,12 +146,12 @@ export class StalkerAPI implements IProvider {
       if (res.status === 200) {
         // Log success silently or verbose
       } else {
-        console.warn(`[Watchdog] Unexpected status code: ${res.status}`);
+        logger.warn(`[Watchdog] Unexpected status code: ${res.status}`);
       }
 
       this.handleWatchdogEvents(res.data);
     } catch (err) {
-      console.error("[Watchdog] Error during check:", (err as Error).message);
+      logger.error(`[Watchdog] Error during check: ${(err as Error).message}`);
     }
   };
 
@@ -159,7 +160,7 @@ export class StalkerAPI implements IProvider {
       clearInterval(this.watchdogInterval);
       this.watchdogInterval = null;
       this.watchdogStarted = false;
-      console.log("[Watchdog] Service stopped.");
+      logger.info("[Watchdog] Service stopped.");
     }
   }
 
@@ -169,22 +170,22 @@ export class StalkerAPI implements IProvider {
     }
     switch (data.event) {
       case "reboot":
-        console.warn("[Watchdog] Event: REBOOT required.");
+        logger.warn("[Watchdog] Event: REBOOT required.");
         break;
       case "reload_portal":
-        console.warn("[Watchdog] Event: RELOAD PORTAL.");
+        logger.warn("[Watchdog] Event: RELOAD PORTAL.");
         break;
       case "send_msg":
-        console.log("[Watchdog] Event: Message received.");
+        logger.info("[Watchdog] Event: Message received.");
         break;
       case "update_channels":
-        console.log("[Watchdog] Event: Channel update available.");
+        logger.info("[Watchdog] Event: Channel update available.");
         break;
       case "update_epg":
-        console.log("[Watchdog] Event: EPG update requested.");
+        logger.info("[Watchdog] Event: EPG update requested.");
         break;
       default:
-        console.log("[Watchdog] Unhandled event:", data.event);
+        logger.info(`[Watchdog] Unhandled event: ${data.event}`);
     }
   }
 
@@ -260,7 +261,7 @@ export class StalkerAPI implements IProvider {
       }
 
       if (this.profileRefreshPromise) {
-        console.log("Waiting for in-progress token refresh...");
+        logger.info("Waiting for in-progress token refresh...");
         return this.profileRefreshPromise;
       }
 
@@ -276,11 +277,11 @@ export class StalkerAPI implements IProvider {
               this.isProfileFetching = false;
               return newToken || null;
             } catch (refreshError) {
-              console.warn("Token refresh failed, forcing full re-handshake.");
+              logger.warn("Token refresh failed, forcing full re-handshake.");
             }
           }
 
-          console.log("Performing full handshake...");
+          logger.info("Performing full handshake...");
           this.cache.del("auth_token");
 
           const response: any = await this.performHandshake();
@@ -300,7 +301,7 @@ export class StalkerAPI implements IProvider {
             throw new Error("Authentication failed - Invalid handshake response");
           }
         } catch (err) {
-          console.error("getToken inner promise error:", err);
+          logger.error(`getToken inner promise error: ${err}`);
           this.cache.del("auth_token");
           this.isProfileFetching = false;
           throw err;
@@ -311,7 +312,7 @@ export class StalkerAPI implements IProvider {
 
       return this.profileRefreshPromise;
     } catch (error) {
-      console.error("getToken outer error:", error);
+      logger.error(`getToken outer error: ${error}`);
       this.profileRefreshPromise = null;
       throw error;
     }
@@ -319,14 +320,14 @@ export class StalkerAPI implements IProvider {
 
   async fetchNewToken() {
     try {
-      console.log("Forcing fetch of NEW token via handshake...");
+      logger.info("Forcing fetch of NEW token via handshake...");
       // remove current token to force fresh handshake
       this.cache.del("auth_token");
       // call getToken with refresh=true logic implicit in cache deletion
       const token = await this.getToken(true);
       return { token };
     } catch (error) {
-      console.error("fetchNewToken failed:", error);
+      logger.error(`fetchNewToken failed: ${error}`);
       return { token: null, error };
     }
   }
@@ -337,7 +338,7 @@ export class StalkerAPI implements IProvider {
       // or append if you prefer history.
       await Token.destroy({ where: {} });
       await Token.create({ token, isValid: true });
-    } catch (e) { console.error("DB Token update failed", e) }
+    } catch (e) { logger.error(`DB Token update failed ${e}`) }
   }
 
   clearCache() {
@@ -389,7 +390,7 @@ export class StalkerAPI implements IProvider {
       return null;
 
     } catch (e) {
-      console.error("Failed to get expiry:", e);
+      logger.error(`Failed to get expiry: ${e}`);
       return null;
     }
   }
@@ -455,7 +456,7 @@ export class StalkerAPI implements IProvider {
         );
       }
 
-      console.log("Expires on : ", profile.js.expire_billing_date);
+      logger.info(`Expires on : ${profile.js.expire_billing_date}`);
 
       if (profile.js.status === 2 && secondAuth == 0) {
         await this.__refreshToken(1);
@@ -464,9 +465,9 @@ export class StalkerAPI implements IProvider {
         // await this.startWatchdog();
       }
     } catch (error) {
-      console.error(
-        "__refreshToken error:",
-        (error as AxiosError).message || error
+      logger.error(
+        `__refreshToken error: ${(error as AxiosError).message || error
+        }`
       );
       throw error;
     }
@@ -509,7 +510,7 @@ export class StalkerAPI implements IProvider {
           response === "Authorization failed."
         ) {
           if (!loop && !this.isProfileFetching) {
-            console.log("Auth failed. Refreshing token and retrying request...");
+            logger.info("Auth failed. Refreshing token and retrying request...");
             await this.getToken(true);
             return this.makeRequest(endpoint, params, isFetch, true);
           }
@@ -521,7 +522,7 @@ export class StalkerAPI implements IProvider {
       } catch (error: any) {
         if (axios.isAxiosError(error) && error.response?.status === 401) {
           if (!loop) {
-            console.warn("401 detected. Retrying with fresh token...");
+            logger.warn("401 detected. Retrying with fresh token...");
             this.cache.del("auth_token");
             await this.getToken(true);
             return this.makeRequest(endpoint, params, isFetch, true);
@@ -710,7 +711,7 @@ export class StalkerAPI implements IProvider {
         initialConfig.tokens.push(token);
       }
     } catch (err) {
-      console.error("Failed to save token to DB:", err);
+      logger.error(`Failed to save token to DB: ${err}`);
     }
   }
 
@@ -719,7 +720,7 @@ export class StalkerAPI implements IProvider {
       await Token.destroy({ where: { token } });
       initialConfig.tokens = initialConfig.tokens.filter((t) => t !== token);
     } catch (err) {
-      console.error("Failed to remove token from DB:", err);
+      logger.error(`Failed to remove token from DB: ${err}`);
     }
   }
 }
