@@ -40,61 +40,64 @@ interface CacheRecord {
 
 const cache = new NodeCache({ stdTTL: 600, checkperiod: 60 });
 
-const pendingCommands = new Map<string, Promise<string | null>>();
+const pendingCommands = new Map<string, Promise<void>>();
 
-async function populateCache(cmd: string): Promise<string> {
+async function populateCache(cmd: string): Promise<void> {
   if (pendingCommands.has(cmd)) {
-    const result = await pendingCommands.get(cmd)!;
-    if (result === null) {
-      throw new Error("Stream Not Found");
-    }
-    return result;
+    await pendingCommands.get(cmd);
+    return;
   }
 
-  const promise = cmdPlayerV2(cmd);
-  pendingCommands.set(cmd, promise);
+  const initCache = async () => {
+    const masterUrl = await cmdPlayerV2(cmd);
+    if (!masterUrl) {
+      throw new Error("Stream Not Found");
+    }
 
-  const masterUrl = await promise.finally(() => {
+    const res = await axios.get(masterUrl, {
+      headers: {
+        // "User-Agent": STANDARD_USER_AGENT,
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+      },
+      validateStatus: () => true
+    });
+
+    if (res.status !== 200) {
+      throw new Error(`Upstream Error: ${res.status}`);
+    }
+
+    logger.info(`Master URL fetched: ${masterUrl}`);
+
+    const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
+    const seqMatch = res.data.match(sequenceRegex);
+    let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
+
+    const lines = res.data.split("\n");
+    const segments = new Map<number, string>();
+    let subpath: string | undefined = undefined;
+
+    lines.forEach((line: string) => {
+      if (line.startsWith("#") || line.trim() === "") return;
+
+      if (line.includes(".m3u8")) {
+        if (!subpath) subpath = line;
+        return;
+      }
+
+      segments.set(currentSeq, line);
+      currentSeq++;
+    });
+
+    cache.set(cmd, { baseUrl, segments, subpath } as CacheRecord);
+  };
+
+  const promise = initCache().finally(() => {
     pendingCommands.delete(cmd);
   });
 
-  if (!masterUrl) {
-    throw new Error("Stream Not Found");
-  }
-
-  const res = await axios.get(masterUrl);
-  logger.info(`Master URL fetched: ${masterUrl}`);
-
-
-  const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
-
-  // CHANGED: Extract Media Sequence
-  const seqMatch = res.data.match(sequenceRegex);
-  let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
-
-  const lines = res.data.split("\n");
-  const segments = new Map<number, string>();
-
-  const modifiedLines = lines.map((line: string) => {
-    if (line.startsWith("#") || line.trim() === "") {
-      return line;
-    }
-    if (line.endsWith(".m3u8")) {
-      return `/live.m3u8?cmd=${encodeURIComponent(
-        cmd
-      )}&subpath=${encodeURIComponent(line)}`;
-    }
-
-    // CHANGED: Use sequence number for Resource ID
-    const resourceId = `${cmd}<_>${currentSeq}`;
-    segments.set(currentSeq, line);
-    currentSeq++; // Increment for next segment
-
-    return generateSignedUrl(resourceId);
-  });
-
-  cache.set(cmd, { baseUrl, segments } as CacheRecord);
-  return modifiedLines.join("\n");
+  pendingCommands.set(cmd, promise);
+  await promise;
 }
 
 async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {

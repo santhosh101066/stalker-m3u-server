@@ -32,6 +32,13 @@ class SocketService {
             logger.info(`[Socket] New connection: ${socket.id}`);
 
             socket.on("register", (data: { id: string; name: string; type: 'receiver' | 'controller' }) => {
+                // Check if device with same ID already exists and remove it (cleanup)
+                for (const [sId, dev] of this.devices.entries()) {
+                    if (dev.id === data.id) {
+                        this.devices.delete(sId);
+                    }
+                }
+
                 const device: Device = {
                     id: data.id,
                     socketId: socket.id,
@@ -39,10 +46,8 @@ class SocketService {
                     type: data.type,
                     ip: socket.handshake.address,
                 };
-                this.devices.set(socket.id, device);
-                logger.info(`[Socket] Device registered: ${device.name} (${device.type})`);
 
-                // Broadcast updated list to all controllers
+                this.devices.set(socket.id, device);
                 this.broadcastReceivers();
             });
 
