@@ -44,7 +44,10 @@ const init = async () => {
     method: "GET",
     path: "/",
     handler: (request, h) => {
-      return h.file(path.join(process.cwd(), "public", "index.html"));
+      return h.file(path.join(process.cwd(), "public", "index.html")).header(
+        "Content-Security-Policy",
+        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
+      );
     },
   });
 
@@ -80,9 +83,14 @@ const init = async () => {
         !filePath.endsWith(".png") &&
         !filePath.endsWith(".jpg") &&
         !filePath.endsWith(".ico") &&
-        !filePath.endsWith(".svg")
+        !filePath.endsWith(".svg") &&
+        !filePath.endsWith(".webmanifest")
+        // !filePath.endsWith(".json")
       ) {
-        return h.file(path.join(process.cwd(), "public", "index.html"));
+        return h.file(path.join(process.cwd(), "public", "index.html")).header(
+          "Content-Security-Policy",
+          "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
+        );
       }
 
       return h.file(filePath);

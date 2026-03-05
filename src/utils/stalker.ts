@@ -482,6 +482,10 @@ export class StalkerAPI implements IProvider {
 
     // --- QUEUE LIMITER APPLIED HERE ---
     return requestLimit(async () => {
+      if (this.profileRefreshPromise) {
+        logger.info(`[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`);
+        await this.profileRefreshPromise;
+      }
       let token = this.cache.get<string>("auth_token");
       if (!token) {
         token = (await this.getToken(false)) || "";
@@ -509,9 +513,18 @@ export class StalkerAPI implements IProvider {
           (typeof response === "string" && response.startsWith("Authorization failed.")) ||
           response === "Authorization failed."
         ) {
-          if (!loop && !this.isProfileFetching) {
-            logger.info("Auth failed. Refreshing token and retrying request...");
-            await this.getToken(true);
+          if (!loop) {
+            logger.info(`Auth failed for ${endpoint}. Handling token refresh...`);
+            
+            // FIX 2: Only clear cache and fetch new token if no other request has started it yet
+            if (!this.profileRefreshPromise) {
+              this.cache.del("auth_token");
+              // Start the fetch but don't await it directly here, let the promise reference be saved
+              this.getToken(true).catch(err => logger.error(`Token refresh failed: ${err}`));
+            }
+            
+            // Wait for whichever process started the token refresh
+            await this.profileRefreshPromise;
             return this.makeRequest(endpoint, params, isFetch, true);
           }
           throw new Error("Authorization Failed.");

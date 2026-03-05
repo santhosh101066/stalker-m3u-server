@@ -38,7 +38,7 @@ interface CacheRecord {
   subpath?: string;
 }
 
-const cache = new NodeCache({ stdTTL: 600, checkperiod: 60 });
+const cache = new NodeCache({ stdTTL: 30, checkperiod: 10 });
 
 const pendingCommands = new Map<string, Promise<void>>();
 
@@ -50,46 +50,44 @@ async function populateCache(cmd: string): Promise<void> {
 
   const initCache = async () => {
     const masterUrl = await cmdPlayerV2(cmd);
-    if (!masterUrl) {
-      throw new Error("Stream Not Found");
-    }
+    if (!masterUrl) throw new Error("Stream Not Found");
 
-    const res = await axios.get(masterUrl, {
-      headers: {
-        // "User-Agent": STANDARD_USER_AGENT,
-        "Accept": "*/*",
-        "Connection": "keep-alive"
-      },
-      validateStatus: () => true
+    // 1. Fetch Master
+    const masterRes = await axios.get(masterUrl, {
+      headers: { "User-Agent": "VLC/3.0.18" }
     });
 
-    if (res.status !== 200) {
-      throw new Error(`Upstream Error: ${res.status}`);
-    }
-
-    logger.info(`Master URL fetched: ${masterUrl}`);
-
     const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
-    const seqMatch = res.data.match(sequenceRegex);
+    const lines = masterRes.data.split("\n");
+    
+    // Find the first sub-playlist link
+    let subpath = lines.find((l: string) => l.includes(".m3u8") && !l.startsWith("#"));
+    
+    if (!subpath) throw new Error("No Sub-playlist found in Master");
+
+    // 2. FETCH THE ACTUAL MEDIA PLAYLIST (This has the segments!)
+    const subUrl = new URL(subpath, baseUrl).href;
+    const mediaRes = await axios.get(subUrl, {
+      headers: { "User-Agent": "VLC/3.0.18" }
+    });
+
+    // Use the sub-playlist's base URL for segments
+    const finalBaseUrl = subUrl.substring(0, subUrl.lastIndexOf("/") + 1);
+    
+    const seqMatch = mediaRes.data.match(sequenceRegex);
     let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
 
-    const lines = res.data.split("\n");
     const segments = new Map<number, string>();
-    let subpath: string | undefined = undefined;
-
-    lines.forEach((line: string) => {
-      if (line.startsWith("#") || line.trim() === "") return;
-
-      if (line.includes(".m3u8")) {
-        if (!subpath) subpath = line;
-        return;
-      }
-
-      segments.set(currentSeq, line);
+    mediaRes.data.split("\n").forEach((line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      
+      segments.set(currentSeq, trimmed);
       currentSeq++;
     });
 
-    cache.set(cmd, { baseUrl, segments, subpath } as CacheRecord);
+    logger.info(`Successfully cached ${segments.size} segments. Start Seq: ${seqMatch ? seqMatch[1] : 0}`);
+    cache.set(cmd, { baseUrl: finalBaseUrl, segments, subpath } as CacheRecord);
   };
 
   const promise = initCache().finally(() => {
@@ -205,6 +203,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
     } else {
       // Fetch master playlist logic
       const masterUrl = await cmdPlayerV2(cmd);
+      if (!masterUrl) return h.response({ error: "Stream Not Found" }).code(404);
       const res = await fetchPlaylist(masterUrl);
       if ((res as any).isBoom) return res;
 
@@ -289,7 +288,8 @@ export const liveRoutes: ServerRoute[] = [
         if (parts.length !== 2) {
           return h.response("Invalid resource ID format").code(400);
         }
-        const [cmd, seqStr] = parts;
+        const seqStr = parts.pop(); // Last part is always the sequence
+        const cmd = parts.join("<_>"); // Rest is the command/URL
         const seqId = Number(seqStr);
 
         if (isNaN(seqId)) {
@@ -298,21 +298,29 @@ export const liveRoutes: ServerRoute[] = [
 
         let record: CacheRecord | undefined = cache.get(cmd);
 
-        // Look up by Map key (seqId)
+
         if (!record || !record.segments.has(seqId)) {
           try {
+            logger.info(`Segment ${seqId} missing in cache for ${cmd}. Refreshing...`);
             await populateCache(cmd);
-            record = cache.get(cmd);
+            record = cache.get(cmd); // Update local record after refresh
           } catch (err) {
-            console.error(err);
-            // Allow main error handler to catch this
-            throw err;
-          }
-          if (!record || !record.segments.has(seqId)) {
-            return h.response("Segment not found").code(404);
+            logger.error(`Failed to refresh cache for ${cmd}: ${err}`);
           }
         }
 
+        // 2. Final Guard and Logging (This is key!)
+        if (!record || !record.segments.has(seqId)) {
+          // Available keys range-ah check panna sequence drift kandupidikalaam
+          const keys = record ? Array.from(record.segments.keys()) : [];
+          const min = keys.length ? Math.min(...keys) : 0;
+          const max = keys.length ? Math.max(...keys) : 0;
+
+          logger.warn(`Sequence Out of Range: Requested ${seqId}, Available ${min} to ${max}`);
+          return h.response("Segment not found").code(404);
+        }
+
+        // 3. Safe Path Retrieval
         const segmentPath = record.segments.get(seqId);
         if (!segmentPath) return h.response("Segment path invalid").code(404);
 
@@ -338,7 +346,7 @@ export const liveRoutes: ServerRoute[] = [
             });
 
             // Force VLC User-Agent as requested
-            headers["User-Agent"] = "VLC/3.0.18 LibVLC/3.0.18";
+            // headers["User-Agent"] = "VLC/3.0.18 LibVLC/3.0.18";
 
             const options: RequestOptions = {
               method: "GET",
