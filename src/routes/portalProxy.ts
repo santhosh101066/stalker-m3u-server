@@ -12,10 +12,8 @@ export const portalProxy: ServerRoute[] = [
         return h.response("Missing url").code(400);
       }
 
-
       const decodedUrl = Buffer.from(url, "base64").toString("utf-8");
       const client = decodedUrl.startsWith("https") ? https : http;
-      
 
       return new Promise((resolve, reject) => {
         const upstreamReq = client.get(
@@ -28,7 +26,6 @@ export const portalProxy: ServerRoute[] = [
             },
           },
           (upstreamRes) => {
-            // ✅ wrap upstream Node stream in Hapi response
             const response = h.response(upstreamRes);
 
             response
@@ -37,22 +34,21 @@ export const portalProxy: ServerRoute[] = [
               .header("Cache-Control", "no-cache")
               .header("Connection", "keep-alive");
 
-            // forward upstream headers
             if (upstreamRes.headers["content-length"]) {
               response.header(
                 "Content-Length",
-                upstreamRes.headers["content-length"]
+                upstreamRes.headers["content-length"],
               );
             }
             if (upstreamRes.headers["accept-ranges"]) {
               response.header(
                 "Accept-Ranges",
-                upstreamRes.headers["accept-ranges"]
+                upstreamRes.headers["accept-ranges"],
               );
             }
 
             resolve(response);
-          }
+          },
         );
 
         upstreamReq.on("error", (err) => {

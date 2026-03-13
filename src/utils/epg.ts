@@ -1,10 +1,15 @@
-import { readChannels, readGenres, readEpgCache, writeEpgCache } from "./storage";
+import {
+  readChannels,
+  readGenres,
+  readEpgCache,
+  writeEpgCache,
+} from "./storage";
 import { serverManager } from "@/serverManager";
 import { Channel, EPG_List, Genre } from "@/types/types";
 import { initialConfig } from "@/config/server";
-import { ConfigProfile } from "@/models/ConfigProfile"; // Import ConfigProfile
+import { ConfigProfile } from "@/models/ConfigProfile";
 
-const CACHE_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
+const CACHE_DURATION_MS = 12 * 60 * 60 * 1000;
 
 interface EpgCache {
   timestamp: Date;
@@ -17,17 +22,18 @@ interface EpgCache {
  */
 export async function getEpgCache(): Promise<EpgCache | null> {
   try {
-    // --- NEW: Get Active Profile ID ---
-    const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+    const activeProfile = await ConfigProfile.findOne({
+      where: { isActive: true },
+    });
     const profileId = activeProfile?.id;
-    // ----------------------------------
 
-    const cache = await readEpgCache(profileId); // Pass profileId
+    const cache = await readEpgCache(profileId);
     if (!cache) {
       return null;
     }
 
-    const isStale = Date.now() - new Date(cache.timestamp).getTime() > CACHE_DURATION_MS;
+    const isStale =
+      Date.now() - new Date(cache.timestamp).getTime() > CACHE_DURATION_MS;
     if (isStale) {
       return null;
     }
@@ -44,41 +50,63 @@ export async function getEpgCache(): Promise<EpgCache | null> {
 export async function fetchAndCacheEpg(): Promise<EpgCache> {
   console.log("Fetching fresh EPG data...");
 
-  // --- NEW: Get Active Profile ID ---
-  const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+  const activeProfile = await ConfigProfile.findOne({
+    where: { isActive: true },
+  });
   const profileId = activeProfile?.id;
-  // ----------------------------------
 
-  // Pass profileId to reads
   const channels = await readChannels(profileId);
   const genres = await readGenres("channel", profileId);
 
-  // Filter channels based on the user's config
   const filteredChannels = channels.filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
     return genre && initialConfig.groups.includes(genre.title);
   });
 
-  // Fetch EPG for all filtered channels in parallel
-  const promises = filteredChannels.map((channel) =>
-    serverManager.getProvider().getEPG(channel.id).then(
-      (epg) => ({
-        id: channel.id,
-        epg: epg.js || [], // Ensure epg.js is an array
-      }),
-      (error) => {
-        console.error(`Failed to fetch EPG for channel ${channel.id}:`, error);
-        return {
-          id: channel.id,
-          epg: [], // Return empty array on failure for this channel
-        };
-      }
-    )
+  const CONCURRENCY_LIMIT = 10;
+  const DELAY_BETWEEN_CHUNKS = 1000;
+  const results: { id: string; epg: EPG_List[] }[] = [];
+
+  const delay = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  console.log(
+    `Starting EPG fetch for ${filteredChannels.length} channels in batches of ${CONCURRENCY_LIMIT}...`,
   );
 
-  const results = await Promise.all(promises);
+  for (let i = 0; i < filteredChannels.length; i += CONCURRENCY_LIMIT) {
+    const chunk = filteredChannels.slice(i, i + CONCURRENCY_LIMIT);
 
-  // Consolidate into a map of { channelId: epgArray }
+    const chunkPromises = chunk.map((channel) =>
+      serverManager
+        .getProvider()
+        .getEPG(channel.id)
+        .then(
+          (epg) => ({
+            id: channel.id,
+            epg: epg.js || [],
+          }),
+          (error) => {
+            console.error(
+              `Failed to fetch EPG for channel ${channel.id}:`,
+              error.message || error,
+            );
+            return {
+              id: channel.id,
+              epg: [],
+            };
+          },
+        ),
+    );
+
+    const chunkResults = await Promise.all(chunkPromises);
+    results.push(...chunkResults);
+
+    if (i + CONCURRENCY_LIMIT < filteredChannels.length) {
+      await delay(DELAY_BETWEEN_CHUNKS);
+    }
+  }
+
   const epgData = results.reduce<Record<string, EPG_List[]>>((acc, curr) => {
     acc[curr.id] = curr.epg;
     return acc;
@@ -89,7 +117,6 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
     data: epgData,
   };
 
-  // Write to cache with profileId
   try {
     await writeEpgCache(cache, profileId);
   } catch (error) {

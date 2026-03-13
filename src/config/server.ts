@@ -8,13 +8,12 @@ export const serverConfig = {
   routes: {
     cors: { origin: ["*"] },
     state: {
-      parse: false, // Disable automatic strict parsing of cookies
-      failAction: 'ignore' as const // Ignore errors if parsing fails
-    }
+      parse: false,
+      failAction: "ignore" as const,
+    },
   },
 };
 
-// 1. Define Defaults
 const ConfigDefault: Config = {
   hostname: process.env.STALKER_HOST || "portal.example.com",
   port: Number(process.env.STALKER_PORT) || 80,
@@ -25,14 +24,16 @@ const ConfigDefault: Config = {
   proxy: false,
   tokens: [],
   playCensored: false,
-  providerType: 'stalker',
-  username: 'user',
-  password: 'password',
+  providerType: "stalker",
+  username: "user",
+  password: "password",
 };
 
 const proxySecret = process.env.PROXY_SECRET;
-if (process.env.NODE_ENV === 'production' && !proxySecret) {
-  throw new Error("FATAL: PROXY_SECRET environment variable is required in production mode.");
+if (process.env.NODE_ENV === "production" && !proxySecret) {
+  throw new Error(
+    "FATAL: PROXY_SECRET environment variable is required in production mode.",
+  );
 } else if (!proxySecret) {
   console.warn("WARNING: PROXY_SECRET not set, using insecure default.");
 }
@@ -40,19 +41,18 @@ if (process.env.NODE_ENV === 'production' && !proxySecret) {
 const AppConfigDefault: AppConfig = {
   api: {
     timeout: Number(process.env.API_TIMEOUT) || 5000,
-    retries: Number(process.env.API_RETRIES) || 3
+    retries: Number(process.env.API_RETRIES) || 3,
   },
   app: {
     name: "stalker-m3u-server",
     environment: process.env.NODE_ENV || "production",
-    logLevel: process.env.LOG_LEVEL || "info"
+    logLevel: process.env.LOG_LEVEL || "info",
   },
   proxy: {
-    secretKey: proxySecret || "default-secret-key-please-change"
-  }
+    secretKey: proxySecret || "default-secret-key-please-change",
+  },
 };
 
-// --- KEY CHANGE: Export as CONST so the reference never changes ---
 export const initialConfig: Config = { ...ConfigDefault };
 export const appConfig: AppConfig = { ...AppConfigDefault };
 
@@ -85,15 +85,16 @@ export async function migrateToProfiles() {
 
 export async function loadActiveProfileFromDB() {
   try {
-    const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
+    const activeProfile = await ConfigProfile.findOne({
+      where: { isActive: true },
+    });
     if (activeProfile) {
-      // --- KEY CHANGE: Update properties of the existing object ---
       Object.assign(initialConfig, activeProfile.config);
 
       console.log(`✅ Loaded active profile: "${activeProfile.name}"`);
 
       const tokens = await Token.findAll();
-      initialConfig.tokens = tokens.map(t => t.token);
+      initialConfig.tokens = tokens.map((t) => t.token);
       console.log(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
     } else {
       console.warn("⚠️ No active profile found. Using defaults.");
@@ -108,7 +109,8 @@ export async function switchProfile(profileId: number) {
   try {
     const profile = await ConfigProfile.findByPk(profileId);
     if (!profile) throw new Error(`Profile ${profileId} not found`);
-    if (!profile.isEnabled) throw new Error(`Profile "${profile.name}" is disabled.`);
+    if (!profile.isEnabled)
+      throw new Error(`Profile "${profile.name}" is disabled.`);
 
     await ConfigProfile.update({ isActive: false }, { where: {} });
 
@@ -124,14 +126,20 @@ export async function switchProfile(profileId: number) {
   }
 }
 
-export async function saveProfileToDB(profileData: { name: string; description?: string; config: Config; isEnabled?: boolean }) {
+export async function saveProfileToDB(profileData: {
+  name: string;
+  description?: string;
+  config: Config;
+  isEnabled?: boolean;
+}) {
   try {
     const profile = await ConfigProfile.create({
       name: profileData.name,
       description: profileData.description,
       config: profileData.config,
       isActive: false,
-      isEnabled: profileData.isEnabled !== undefined ? profileData.isEnabled : true,
+      isEnabled:
+        profileData.isEnabled !== undefined ? profileData.isEnabled : true,
     });
     console.log(`✅ Created profile: "${profile.name}"`);
     return profile;

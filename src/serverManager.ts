@@ -6,60 +6,59 @@ import { initialConfig, loadActiveProfileFromDB } from "@/config/server";
 import { logger } from "@/utils/logger";
 
 class ServerManager {
-    private static instance: ServerManager;
-    private server: Server | null = null;
-    private provider: IProvider | null = null;
+  private static instance: ServerManager;
+  private server: Server | null = null;
+  private provider: IProvider | null = null;
 
-    private constructor() { }
+  private constructor() {}
 
-    static getInstance(): ServerManager {
-        if (!ServerManager.instance) {
-            ServerManager.instance = new ServerManager();
-            ServerManager.instance.initProvider();
-        }
-        return ServerManager.instance;
+  static getInstance(): ServerManager {
+    if (!ServerManager.instance) {
+      ServerManager.instance = new ServerManager();
+      ServerManager.instance.initProvider();
+    }
+    return ServerManager.instance;
+  }
+
+  initProvider() {
+    if (initialConfig.providerType === "xtream") {
+      this.provider = new XtreamClient();
+      logger.info("Initialized Xtream Codes Provider");
+    } else {
+      this.provider = stalkerApi;
+      logger.info("Initialized Stalker Provider");
+    }
+  }
+
+  getProvider(): IProvider {
+    if (!this.provider) {
+      this.initProvider();
+    }
+    return this.provider!;
+  }
+
+  setServer(server: Server) {
+    this.server = server;
+  }
+
+  async restartServer() {
+    if (!this.server) {
+      throw new Error("Server instance not set");
     }
 
-    initProvider() {
-        if (initialConfig.providerType === 'xtream') {
-            this.provider = new XtreamClient();
-            logger.info("Initialized Xtream Codes Provider");
-        } else {
-            // Use the singleton instance
-            this.provider = stalkerApi;
-            logger.info("Initialized Stalker Provider");
-        }
-    }
+    try {
+      await this.server.stop();
 
-    getProvider(): IProvider {
-        if (!this.provider) {
-            this.initProvider();
-        }
-        return this.provider!;
-    }
+      await loadActiveProfileFromDB();
 
-    setServer(server: Server) {
-        this.server = server;
+      this.initProvider();
+      await this.server.start();
+      logger.info("Server successfully restarted");
+    } catch (error) {
+      logger.error(`Failed to restart server: ${error}`);
+      throw error;
     }
-
-    async restartServer() {
-        if (!this.server) {
-            throw new Error('Server instance not set');
-        }
-
-        try {
-            await this.server.stop();
-            // Reload config from DB
-            await loadActiveProfileFromDB();
-            // Re-init provider on restart to pick up config changes
-            this.initProvider();
-            await this.server.start();
-            logger.info('Server successfully restarted');
-        } catch (error) {
-            logger.error(`Failed to restart server: ${error}`);
-            throw error;
-        }
-    }
+  }
 }
 
 export const serverManager = ServerManager.getInstance();

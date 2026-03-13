@@ -18,7 +18,6 @@ import { Token } from "@/models/Token";
 import pLimit from "p-limit";
 import { logger } from "@/utils/logger";
 
-// Limit concurrent requests to the Portal to 5 at a time
 const requestLimit = pLimit(5);
 
 async function httpRequest<T = any>(
@@ -28,7 +27,7 @@ async function httpRequest<T = any>(
     method?: string;
     headers?: Record<string, string>;
     timeout?: number;
-  } = { timeout: 120000 }
+  } = { timeout: 120000 },
 ): Promise<T> {
   return httpClient
     .request<T>({
@@ -39,7 +38,6 @@ async function httpRequest<T = any>(
       timeout: 120000,
     })
     .then((res) => {
-      // Maintain original behavior: throw if not 200
       if (res.status !== 200) {
         throw new Error(`Request failed with status ${res.status}`);
       }
@@ -58,6 +56,7 @@ export class StalkerAPI implements IProvider {
   private watchdogInterval: NodeJS.Timeout | null = null;
   private watchdogStarted: boolean = false;
   private activeChannelId: string = "0";
+  private lastRequestTime: number = 0;
 
   constructor() {
     this.loadTokenFromDB();
@@ -67,9 +66,10 @@ export class StalkerAPI implements IProvider {
     try {
       const tokenRecord = await Token.findOne({ where: { isValid: true } });
       if (tokenRecord?.token) {
-        logger.info(`[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`);
+        logger.info(
+          `[StalkerAPI] Restored valid token from DB: ${tokenRecord.token}`,
+        );
         this.cache.set("auth_token", tokenRecord.token, 3600);
-        // this.startWatchdog();
       }
     } catch (err) {
       logger.warn("[StalkerAPI] Could not restore token from DB");
@@ -77,11 +77,11 @@ export class StalkerAPI implements IProvider {
   }
 
   getBaseUrl() {
-    return `http://${initialConfig.hostname}:${initialConfig.port}${initialConfig.contextPath != "" ? `/${initialConfig.contextPath}` : ""
-      }`;
+    return `http://${initialConfig.hostname}:${initialConfig.port}${
+      initialConfig.contextPath != "" ? `/${initialConfig.contextPath}` : ""
+    }`;
   }
 
-  // Used for Content Requests AND Auth (Dynamic based on context)
   getPhpUrl() {
     return initialConfig.contextPath != "" ? "/server/load.php" : "/portal.php";
   }
@@ -93,10 +93,8 @@ export class StalkerAPI implements IProvider {
     this.watchdogStarted = true;
     logger.info(`[Watchdog] Starting service with ${interval}s interval...`);
 
-    // Run once immediately to establish state
     await this.runWatchdogCheck(true);
 
-    // Start the loop
     this.watchdogInterval = setInterval(() => {
       this.runWatchdogCheck();
     }, interval * 1000);
@@ -120,9 +118,6 @@ export class StalkerAPI implements IProvider {
 
       const currentTime = new Date().toISOString().split("T")[1].split(".")[0];
 
-      // Watchdog usually goes to getPhpUrl() (load.php or portal.php depending on config)
-      // kept as getPhpUrl() unless this specifically needs portal.php too.
-      // Usually watchdog events come from the load balancer/server script.
       const res = await httpClient.get(
         `${this.getBaseUrl()}${this.getPhpUrl()}`,
         this._getAxiosRequestConfig(
@@ -139,12 +134,11 @@ export class StalkerAPI implements IProvider {
             validateStatus: (status) => true,
             withCredentials: true,
             contentType: "application/json",
-          }
-        )
+          },
+        ),
       );
 
       if (res.status === 200) {
-        // Log success silently or verbose
       } else {
         logger.warn(`[Watchdog] Unexpected status code: ${res.status}`);
       }
@@ -197,7 +191,7 @@ export class StalkerAPI implements IProvider {
       withCredentials?: boolean;
       validateStatus?: (status: number) => boolean;
       referrer?: string;
-    }
+    },
   ): AxiosRequestConfig {
     return {
       params: {
@@ -225,7 +219,6 @@ export class StalkerAPI implements IProvider {
   }
 
   private async performHandshake(token: string = "") {
-    // --- UPDATED: Uses getPhpUrl() (Dynamic: load.php if context exists, portal.php if empty) ---
     return httpRequest(
       `${this.getBaseUrl()}${this.getPhpUrl()}`,
       {
@@ -247,7 +240,7 @@ export class StalkerAPI implements IProvider {
           headers: config.headers as Record<string, string>,
           timeout: config.timeout,
         };
-      })()
+      })(),
     );
   }
 
@@ -256,7 +249,12 @@ export class StalkerAPI implements IProvider {
       const cachedToken = this.cache.get<string>("auth_token");
       const ttl = this.cache.getTtl("auth_token");
 
-      if (!refreshToken && cachedToken && ttl && ttl - Date.now() > 5 * 60 * 1000) {
+      if (
+        !refreshToken &&
+        cachedToken &&
+        ttl &&
+        ttl - Date.now() > 5 * 60 * 1000
+      ) {
         return cachedToken;
       }
 
@@ -298,7 +296,9 @@ export class StalkerAPI implements IProvider {
             this.isProfileFetching = false;
             return newToken;
           } else {
-            throw new Error("Authentication failed - Invalid handshake response");
+            throw new Error(
+              "Authentication failed - Invalid handshake response",
+            );
           }
         } catch (err) {
           logger.error(`getToken inner promise error: ${err}`);
@@ -321,9 +321,9 @@ export class StalkerAPI implements IProvider {
   async fetchNewToken() {
     try {
       logger.info("Forcing fetch of NEW token via handshake...");
-      // remove current token to force fresh handshake
+
       this.cache.del("auth_token");
-      // call getToken with refresh=true logic implicit in cache deletion
+
       const token = await this.getToken(true);
       return { token };
     } catch (error) {
@@ -334,11 +334,11 @@ export class StalkerAPI implements IProvider {
 
   private async updateTokenInDB(token: string) {
     try {
-      // Keeping only one valid token for simplicity in home use, 
-      // or append if you prefer history.
       await Token.destroy({ where: {} });
       await Token.create({ token, isValid: true });
-    } catch (e) { logger.error(`DB Token update failed ${e}`) }
+    } catch (e) {
+      logger.error(`DB Token update failed ${e}`);
+    }
   }
 
   clearCache() {
@@ -352,9 +352,6 @@ export class StalkerAPI implements IProvider {
       if (!currentToken) {
         await this.getToken(false);
       }
-      // We can reuse the logic from __refreshToken or just call get_profile directly
-      // But __refreshToken is private and complex.
-      // Let's make a direct call similar to __refreshToken but returning the date.
 
       const token = this.cache.get<string>("auth_token");
       if (!token) return null;
@@ -381,14 +378,13 @@ export class StalkerAPI implements IProvider {
             headers: config.headers as Record<string, string>,
             timeout: config.timeout,
           };
-        })()
+        })(),
       );
 
       if (profile && profile.js && profile.js.expire_billing_date) {
         return profile.js.expire_billing_date;
       }
       return null;
-
     } catch (e) {
       logger.error(`Failed to get expiry: ${e}`);
       return null;
@@ -403,7 +399,6 @@ export class StalkerAPI implements IProvider {
     try {
       this.stopWatchdog();
 
-      // --- UPDATED: Uses getPhpUrl() (Dynamic: load.php if context exists, portal.php if empty) ---
       const profile = await httpRequest(
         `${this.getBaseUrl()}${this.getPhpUrl()}`,
         {
@@ -447,12 +442,12 @@ export class StalkerAPI implements IProvider {
             headers: config.headers as Record<string, string>,
             timeout: config.timeout,
           };
-        })()
+        })(),
       );
 
       if (typeof profile !== "object" || !profile.js) {
         throw new Error(
-          "Profile refresh failed, invalid response. Likely auth failure."
+          "Profile refresh failed, invalid response. Likely auth failure.",
         );
       }
 
@@ -462,12 +457,10 @@ export class StalkerAPI implements IProvider {
         await this.__refreshToken(1);
       } else {
         this.cache.ttl("auth_token", 3600);
-        // await this.startWatchdog();
       }
     } catch (error) {
       logger.error(
-        `__refreshToken error: ${(error as AxiosError).message || error
-        }`
+        `__refreshToken error: ${(error as AxiosError).message || error}`,
       );
       throw error;
     }
@@ -477,13 +470,15 @@ export class StalkerAPI implements IProvider {
     endpoint: string,
     params: Record<string, any> = {},
     isFetch = true,
-    loop = false
+    loop = false,
   ): Promise<T> {
+    this.lastRequestTime = Date.now();
 
-    // --- QUEUE LIMITER APPLIED HERE ---
     return requestLimit(async () => {
       if (this.profileRefreshPromise) {
-        logger.info(`[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`);
+        logger.info(
+          `[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`,
+        );
         await this.profileRefreshPromise;
       }
       let token = this.cache.get<string>("auth_token");
@@ -506,24 +501,27 @@ export class StalkerAPI implements IProvider {
               headers: config.headers as Record<string, string>,
               timeout: config.timeout,
             };
-          })()
+          })(),
         );
 
         if (
-          (typeof response === "string" && response.startsWith("Authorization failed.")) ||
+          (typeof response === "string" &&
+            response.startsWith("Authorization failed.")) ||
           response === "Authorization failed."
         ) {
           if (!loop) {
-            logger.info(`Auth failed for ${endpoint}. Handling token refresh...`);
-            
-            // FIX 2: Only clear cache and fetch new token if no other request has started it yet
+            logger.info(
+              `Auth failed for ${endpoint}. Handling token refresh...`,
+            );
+
             if (!this.profileRefreshPromise) {
               this.cache.del("auth_token");
-              // Start the fetch but don't await it directly here, let the promise reference be saved
-              this.getToken(true).catch(err => logger.error(`Token refresh failed: ${err}`));
+
+              this.getToken(true).catch((err) =>
+                logger.error(`Token refresh failed: ${err}`),
+              );
             }
-            
-            // Wait for whichever process started the token refresh
+
             await this.profileRefreshPromise;
             return this.makeRequest(endpoint, params, isFetch, true);
           }
@@ -531,7 +529,6 @@ export class StalkerAPI implements IProvider {
         }
 
         return response;
-
       } catch (error: any) {
         if (axios.isAxiosError(error) && error.response?.status === 401) {
           if (!loop) {
@@ -545,8 +542,6 @@ export class StalkerAPI implements IProvider {
       }
     });
   }
-
-  // --- CONTENT METHODS USE getPhpUrl() (Server Load PHP) ---
 
   async getChannelGroups() {
     return this.makeRequest<Data<Genre[]>>(this.getPhpUrl(), {
@@ -571,7 +566,7 @@ export class StalkerAPI implements IProvider {
         cmd,
         disable_ad: "0",
       },
-      true
+      true,
     );
   }
 
@@ -612,7 +607,7 @@ export class StalkerAPI implements IProvider {
       this.getPhpUrl(),
       params,
       true,
-      false
+      false,
     );
   }
 
@@ -648,10 +643,9 @@ export class StalkerAPI implements IProvider {
       this.getPhpUrl(),
       params,
       true,
-      false
+      false,
     );
   }
-
 
   async getMovieLink({
     series,
@@ -673,12 +667,7 @@ export class StalkerAPI implements IProvider {
       cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
     };
 
-    // Note: getMovieLink explicitly used "/server/load.php" in original.
-    // getPhpUrl() will return that anyway if contextPath exists.
-    return this.makeRequest<Data<Programs<Video>>>(
-      "/server/load.php",
-      params
-    );
+    return this.makeRequest<Data<Programs<Video>>>("/server/load.php", params);
   }
 
   async getSeriesLink({
@@ -735,6 +724,21 @@ export class StalkerAPI implements IProvider {
     } catch (err) {
       logger.error(`Failed to remove token from DB: ${err}`);
     }
+  }
+
+  getActiveRequestCount() {
+    return requestLimit.activeCount + requestLimit.pendingCount;
+  }
+
+  getLastRequestTime() {
+    return this.lastRequestTime;
+  }
+
+  isIdle(thresholdMs: number = 30000) {
+    return (
+      this.getActiveRequestCount() === 0 &&
+      Date.now() - this.lastRequestTime > thresholdMs
+    );
   }
 }
 

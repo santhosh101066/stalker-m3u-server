@@ -5,7 +5,7 @@ import { logger } from "./logger";
 export async function cmdPlayerV2(cmd: string) {
   let attempts = 0;
   const maxAttempts = 10;
-  const delay = 1000; // 1 second
+  const delay = 1000;
 
   while (attempts < maxAttempts) {
     try {
@@ -13,7 +13,9 @@ export async function cmdPlayerV2(cmd: string) {
       if (response && response.js && response.js.cmd) {
         return response.js.cmd;
       }
-      logger.warn(`[cmdPlayerV2] Attempt ${attempts + 1} failed to resolve URL for ${cmd}. Retrying...`);
+      logger.warn(
+        `[cmdPlayerV2] Attempt ${attempts + 1} failed to resolve URL for ${cmd}. Retrying...`,
+      );
     } catch (err) {
       logger.error(`[cmdPlayerV2] Error on attempt ${attempts + 1}: ${err}`);
     }
@@ -23,6 +25,8 @@ export async function cmdPlayerV2(cmd: string) {
     }
   }
 
-  logger.error(`[cmdPlayerV2] Failed to resolve URL for ${cmd} after ${maxAttempts} attempts.`);
+  logger.error(
+    `[cmdPlayerV2] Failed to resolve URL for ${cmd} after ${maxAttempts} attempts.`,
+  );
   return null;
 }

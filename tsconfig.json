@@ -4,9 +4,9 @@
     "paths": {
       "@/*": [
         "src/*"
-      ] // allows @/config/server => src/config/server.ts
+      ] 
     },
-    "outDir": "dist", // where compiled files go
+    "outDir": "dist", 
     "module": "commonjs",
     "target": "ES2021",
     "moduleResolution": "node",
@@ -20,7 +20,7 @@
     "rootDir": "src",
     "lib": [
       "ES2021"
-    ] // very important for correct path mapping
+    ] 
   },
   "include": [
     "src"

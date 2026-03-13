@@ -11,14 +11,14 @@ export const sequelize = new Sequelize({
   dialect: "sqlite",
   storage: path.join(process.cwd(), "database.sqlite"),
   models: [Token, SystemConfig, ConfigProfile, Channel, Genre, EpgCache],
-  logging: false, // Set to console.log to see SQL queries
+  logging: false,
 });
 
 export async function initDB() {
   try {
     await sequelize.authenticate();
     console.log("Database connection has been established successfully.");
-    await sequelize.sync(); // Sync models to DB
+    await sequelize.sync();
     console.log("Database models synced.");
   } catch (error) {
     console.error("Unable to connect to the database:", error);

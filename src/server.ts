@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import "dotenv/config";
 import { initialConfig, serverConfig } from "@/config/server";
 import { playlistRoutes } from "./routes/playlist";
 import { liveRoutes } from "./routes/live";
@@ -14,7 +14,7 @@ import { stalkerApi } from "./utils/stalker";
 import { portalProxy } from "./routes/portalProxy";
 import { xtreamRoutes } from "./routes/xtream";
 import { streamRoutes } from "./routes/stream";
-import { vodRoutes } from "./routes/vod"; // Import vodRoutes
+import { vodRoutes } from "./routes/vod";
 import { socketService } from "./services/SocketService";
 
 import { initDB } from "./db";
@@ -24,34 +24,29 @@ import { logger } from "./utils/logger";
 const init = async () => {
   await initDB();
 
-  // Migrate to profiles system if needed
   await migrateToProfiles();
 
-  // Load active profile configuration
   await loadActiveProfileFromDB();
 
-
-
-  // Register routes
   const server = Hapi.server({
     ...serverConfig,
   });
 
   serverManager.setServer(server);
 
-  // --- FIX: Specific Route for Root to serve index.html ---
   server.route({
     method: "GET",
     path: "/",
     handler: (request, h) => {
-      return h.file(path.join(process.cwd(), "public", "index.html")).header(
-        "Content-Security-Policy",
-        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
-      );
+      return h
+        .file(path.join(process.cwd(), "public", "index.html"))
+        .header(
+          "Content-Security-Policy",
+          "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;",
+        );
     },
   });
 
-  // Initialize Socket.io
   socketService.init(server.listener);
 
   await server.register(Inert);
@@ -64,19 +59,18 @@ const init = async () => {
   server.route(portalProxy);
   server.route(xtreamRoutes);
   server.route(streamRoutes);
-  server.route(vodRoutes); // Register vodRoutes
+  server.route(vodRoutes);
 
   server.route({
     method: "GET",
-    path: "/{param*}", // Match all routes
+    path: "/{param*}",
     handler: (request, h) => {
       const filePath = path.join(
         process.cwd(),
         "public",
-        request.params.param || ""
+        request.params.param || "",
       );
 
-      // Serve index.html for unknown files (browser routing)
       if (
         !filePath.endsWith(".js") &&
         !filePath.endsWith(".css") &&
@@ -85,58 +79,42 @@ const init = async () => {
         !filePath.endsWith(".ico") &&
         !filePath.endsWith(".svg") &&
         !filePath.endsWith(".webmanifest")
-        // !filePath.endsWith(".json")
       ) {
-        return h.file(path.join(process.cwd(), "public", "index.html")).header(
-          "Content-Security-Policy",
-          "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
-        );
+        return h
+          .file(path.join(process.cwd(), "public", "index.html"))
+          .header(
+            "Content-Security-Policy",
+            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;",
+          );
       }
 
       return h.file(filePath);
     },
   });
 
-
   server.events.on("response", function (request) {
     logger.info(
       request.info.remoteAddress +
-      ": " +
-      request.method.toUpperCase() +
-      " " +
-      request.path +
-      " --> " +
-      (request.response &&
+        ": " +
+        request.method.toUpperCase() +
+        " " +
+        request.path +
+        " --> " +
+        (request.response &&
         typeof (request.response as any).statusCode === "number"
-        ? (request.response as any).statusCode
-        : request.response &&
-        (request.response as any).output &&
-        (request.response as any).output.statusCode)
+          ? (request.response as any).statusCode
+          : request.response &&
+            (request.response as any).output &&
+            (request.response as any).output.statusCode),
     );
   });
 
   await server.start();
 
-  // async function scheduleTokenFetcher() {
-  //   try {
-  //     if (initialConfig.tokens.length < 350) {
-  //       const tokenResponse = await stalkerApi.fetchNewToken();
-  //       stalkerApi.addToken(tokenResponse.token);
-  //       console.log(
-  //         `Fetched new token: ${tokenResponse.token}. Total tokens: ${initialConfig.tokens.length}`
-  //       );
-  //     }
-  //   } catch (err) {
-  //     console.error("Error fetching new token:", err);
-  //   }
+  const { backgroundJobService } =
+    await import("./services/BackgroundJobService");
+  backgroundJobService.start();
 
-  //   // Adjust next run interval based on token count
-  //   const nextInterval = initialConfig.tokens.length < 100 ?  1 * 60 * 1000 :  5 * 60 * 1000;
-
-  //   setTimeout(scheduleTokenFetcher, nextInterval);
-  // }
-
-  // scheduleTokenFetcher();
   logger.info(`Server running at: ${server.info.uri}`);
 };
 

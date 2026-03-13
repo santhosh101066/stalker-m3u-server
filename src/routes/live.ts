@@ -2,7 +2,7 @@ import { cmdPlayerV2 } from "@/utils/cmdPlayer";
 import axios, { AxiosError, AxiosResponse } from "axios";
 import { ServerRoute } from "@hapi/hapi";
 import { http, https } from "follow-redirects";
-import { RequestOptions } from "https"; // Type import only
+import { RequestOptions } from "https";
 import NodeCache from "node-cache";
 import { appConfig, initialConfig } from "@/config/server";
 import { ReqRefDefaults, ResponseToolkit } from "@hapi/hapi/lib/types";
@@ -31,7 +31,6 @@ function verifySignedUrl(resourceId: string, sig: string): boolean {
   return sig === expectedSig;
 }
 
-// CHANGED: segments is now a Map to hold SequenceID -> URL
 interface CacheRecord {
   baseUrl: string;
   segments: Map<number, string>;
@@ -52,28 +51,26 @@ async function populateCache(cmd: string): Promise<void> {
     const masterUrl = await cmdPlayerV2(cmd);
     if (!masterUrl) throw new Error("Stream Not Found");
 
-    // 1. Fetch Master
     const masterRes = await axios.get(masterUrl, {
-      headers: { "User-Agent": "VLC/3.0.18" }
+      headers: { "User-Agent": "VLC/3.0.18" },
     });
 
     const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
     const lines = masterRes.data.split("\n");
-    
-    // Find the first sub-playlist link
-    let subpath = lines.find((l: string) => l.includes(".m3u8") && !l.startsWith("#"));
-    
+
+    let subpath = lines.find(
+      (l: string) => l.includes(".m3u8") && !l.startsWith("#"),
+    );
+
     if (!subpath) throw new Error("No Sub-playlist found in Master");
 
-    // 2. FETCH THE ACTUAL MEDIA PLAYLIST (This has the segments!)
     const subUrl = new URL(subpath, baseUrl).href;
     const mediaRes = await axios.get(subUrl, {
-      headers: { "User-Agent": "VLC/3.0.18" }
+      headers: { "User-Agent": "VLC/3.0.18" },
     });
 
-    // Use the sub-playlist's base URL for segments
     const finalBaseUrl = subUrl.substring(0, subUrl.lastIndexOf("/") + 1);
-    
+
     const seqMatch = mediaRes.data.match(sequenceRegex);
     let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
 
@@ -81,12 +78,14 @@ async function populateCache(cmd: string): Promise<void> {
     mediaRes.data.split("\n").forEach((line: string) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) return;
-      
+
       segments.set(currentSeq, trimmed);
       currentSeq++;
     });
 
-    logger.info(`Successfully cached ${segments.size} segments. Start Seq: ${seqMatch ? seqMatch[1] : 0}`);
+    logger.info(
+      `Successfully cached ${segments.size} segments. Start Seq: ${seqMatch ? seqMatch[1] : 0}`,
+    );
     cache.set(cmd, { baseUrl: finalBaseUrl, segments, subpath } as CacheRecord);
   };
 
@@ -104,7 +103,9 @@ async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
     if (redirectedUrl) {
       return h.redirect(redirectedUrl).code(302);
     }
-    return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
+    return h
+      .response({ error: "Unable to fetch stream [Non Proxy]" })
+      .code(400);
   } catch (err) {
     logger.error(`Non-proxy error: ${err}`);
     return h.response({ error: "Stream fetch failed" }).code(500);
@@ -131,7 +132,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         if (newMasterUrl) {
           const newBaseUrl = newMasterUrl.substring(
             0,
-            newMasterUrl.lastIndexOf("/") + 1
+            newMasterUrl.lastIndexOf("/") + 1,
           );
           if (record) {
             record.baseUrl = newBaseUrl;
@@ -141,7 +142,9 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         }
       }
       if (res.status < 200 || res.status >= 300 || !res.data) {
-        return h.response({ error: `Upstream Error ${res.status}` }).code(res.status);
+        return h
+          .response({ error: `Upstream Error ${res.status}` })
+          .code(res.status);
       }
       return res;
     };
@@ -153,15 +156,26 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       if ((res as any).isBoom) return res;
 
       if (!res.data || res.status === 403) {
-        // Retry logic for empty data (master url refresh)...
         const newMasterUrl = await cmdPlayerV2(cmd);
-        if (!newMasterUrl) return h.response({ error: "Stream Not Found" }).code(404);
+        if (!newMasterUrl)
+          return h.response({ error: "Stream Not Found" }).code(404);
 
-        const newBaseUrl = newMasterUrl.substring(0, newMasterUrl.lastIndexOf("/") + 1);
-        const refreshedRes = await axios.get(newMasterUrl, { validateStatus: () => true });
+        const newBaseUrl = newMasterUrl.substring(
+          0,
+          newMasterUrl.lastIndexOf("/") + 1,
+        );
+        const refreshedRes = await axios.get(newMasterUrl, {
+          validateStatus: () => true,
+        });
 
-        if (refreshedRes.status < 200 || refreshedRes.status >= 300 || !refreshedRes.data) {
-          return h.response({ error: `Upstream Error ${refreshedRes.status}` }).code(refreshedRes.status);
+        if (
+          refreshedRes.status < 200 ||
+          refreshedRes.status >= 300 ||
+          !refreshedRes.data
+        ) {
+          return h
+            .response({ error: `Upstream Error ${refreshedRes.status}` })
+            .code(refreshedRes.status);
         }
 
         record.baseUrl = newBaseUrl;
@@ -178,7 +192,6 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         cache.set(cmd, record as CacheRecord);
       }
 
-      // CHANGED: Extract Media Sequence for subpath
       const seqMatch = (res as AxiosResponse).data.match(sequenceRegex);
       let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
 
@@ -187,7 +200,6 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         if (line.startsWith("#") || line.trim() === "") return line;
         if (line.match(".m3u8")) return line;
 
-        // CHANGED: Use sequence number
         const resourceId = `${cmd}<_>${currentSeq}`;
         record.segments.set(currentSeq, line);
         currentSeq++;
@@ -195,19 +207,18 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         return generateSignedUrl(resourceId);
       });
 
-      // Update cache with new segments
       cache.set(cmd, record as CacheRecord);
 
-      return h.response(modifiedLines.join("\n")).type("application/vnd.apple.mpegurl");
-
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
     } else {
-      // Fetch master playlist logic
       const masterUrl = await cmdPlayerV2(cmd);
-      if (!masterUrl) return h.response({ error: "Stream Not Found" }).code(404);
+      if (!masterUrl)
+        return h.response({ error: "Stream Not Found" }).code(404);
       const res = await fetchPlaylist(masterUrl);
       if ((res as any).isBoom) return res;
 
-      // CHANGED: Extract Media Sequence for master
       const seqMatch = (res as AxiosResponse).data.match(sequenceRegex);
       let currentSeq = seqMatch ? parseInt(seqMatch[1], 10) : 0;
 
@@ -221,7 +232,6 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
           return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1`;
         }
 
-        // CHANGED: Use sequence number
         const resourceId = `${cmd}<_>${currentSeq}`;
         record.segments.set(currentSeq, line);
         currentSeq++;
@@ -230,14 +240,18 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
       });
 
       cache.set(cmd, record as CacheRecord);
-      return h.response(modifiedLines.join("\n")).type("application/vnd.apple.mpegurl");
+      return h
+        .response(modifiedLines.join("\n"))
+        .type("application/vnd.apple.mpegurl");
     }
   } catch (error: any) {
     const message = error.message || String(error);
     logger.error(`Error: ${(error as Error)?.stack ?? error}`);
 
     if (axios.isAxiosError(error) && error.response) {
-      return h.response({ error: "Upstream Error" }).code(error.response.status);
+      return h
+        .response({ error: "Upstream Error" })
+        .code(error.response.status);
     }
 
     if (message.includes("Stream Not Found") || message.includes("404")) {
@@ -253,7 +267,11 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
-      const { cmd, play, id } = request.query as { cmd?: string; play?: string; id?: string };
+      const { cmd, play, id } = request.query as {
+        cmd?: string;
+        play?: string;
+        id?: string;
+      };
       if (!cmd) return h.response({ error: "Missing cmd parameter" }).code(400);
       if (id) {
         stalkerApi.setActiveChannel(id);
@@ -274,7 +292,6 @@ export const liveRoutes: ServerRoute[] = [
           return h.response("Missing signature parameters").code(400);
         }
 
-        // Strip .ts extension if present
         if (resourceId.endsWith(".ts")) {
           resourceId = resourceId.slice(0, -3);
         }
@@ -283,13 +300,12 @@ export const liveRoutes: ServerRoute[] = [
           return h.response("Invalid or expired signature").code(403);
         }
 
-        // 2. Safer parsing logic
         const parts = resourceId.split("<_>");
         if (parts.length !== 2) {
           return h.response("Invalid resource ID format").code(400);
         }
-        const seqStr = parts.pop(); // Last part is always the sequence
-        const cmd = parts.join("<_>"); // Rest is the command/URL
+        const seqStr = parts.pop();
+        const cmd = parts.join("<_>");
         const seqId = Number(seqStr);
 
         if (isNaN(seqId)) {
@@ -298,55 +314,49 @@ export const liveRoutes: ServerRoute[] = [
 
         let record: CacheRecord | undefined = cache.get(cmd);
 
-
         if (!record || !record.segments.has(seqId)) {
           try {
-            logger.info(`Segment ${seqId} missing in cache for ${cmd}. Refreshing...`);
+            logger.info(
+              `Segment ${seqId} missing in cache for ${cmd}. Refreshing...`,
+            );
             await populateCache(cmd);
-            record = cache.get(cmd); // Update local record after refresh
+            record = cache.get(cmd);
           } catch (err) {
             logger.error(`Failed to refresh cache for ${cmd}: ${err}`);
           }
         }
 
-        // 2. Final Guard and Logging (This is key!)
         if (!record || !record.segments.has(seqId)) {
-          // Available keys range-ah check panna sequence drift kandupidikalaam
           const keys = record ? Array.from(record.segments.keys()) : [];
           const min = keys.length ? Math.min(...keys) : 0;
           const max = keys.length ? Math.max(...keys) : 0;
 
-          logger.warn(`Sequence Out of Range: Requested ${seqId}, Available ${min} to ${max}`);
+          logger.warn(
+            `Sequence Out of Range: Requested ${seqId}, Available ${min} to ${max}`,
+          );
           return h.response("Segment not found").code(404);
         }
 
-        // 3. Safe Path Retrieval
         const segmentPath = record.segments.get(seqId);
         if (!segmentPath) return h.response("Segment path invalid").code(404);
 
         const segmentUrl = new URL(segmentPath, record.baseUrl).href;
 
-        // 3. Proxy Logic
         try {
           return await new Promise((resolve, reject) => {
             const parsedUrl = new URL(segmentUrl);
             const isHttps = parsedUrl.protocol === "https:";
             const client = isHttps ? https : http;
 
-            // Select the keep-alive agent
             const agent = isHttps ? httpsAgent : httpAgent;
 
             const headers: Record<string, string> = {};
 
-            // Forward specific request headers (EXCLUDING user-agent)
             ["range", "accept", "accept-encoding"].forEach((header) => {
               if (request.headers[header]) {
                 headers[header] = request.headers[header] as string;
               }
             });
-
-            // Force VLC User-Agent as requested
-            // headers["User-Agent"] = "VLC/3.0.18 LibVLC/3.0.18";
 
             const options: RequestOptions = {
               method: "GET",
@@ -354,28 +364,33 @@ export const liveRoutes: ServerRoute[] = [
               port: parsedUrl.port || (isHttps ? "443" : "80"),
               path: parsedUrl.pathname + parsedUrl.search,
               headers,
-              agent, // Use the persistent agent
+              agent,
             };
 
             const req = client.request(options, (res) => {
-              // Handle upstream errors (e.g., 404 from the source CDN)
               if (![200, 206].includes(res.statusCode || 0)) {
-                // Consume data to free memory if we aren't using it
                 res.resume();
-                return reject(new Error(`Failed to fetch segment: Upstream ${res.statusCode}`));
+                return reject(
+                  new Error(
+                    `Failed to fetch segment: Upstream ${res.statusCode}`,
+                  ),
+                );
               }
 
-              const response = h.response(res)
+              const response = h
+                .response(res)
                 .code(res.statusCode || 200)
-                .type(res.headers["content-type"] || "application/octet-stream");
+                .type(
+                  res.headers["content-type"] || "application/octet-stream",
+                );
 
-              // 4. Forward response headers safely
-              // REMOVED 'transfer-encoding' to avoid protocol conflicts
-              ["content-length", "accept-ranges", "content-range"].forEach((header) => {
-                if (res.headers[header]) {
-                  response.header(header, res.headers[header] as string);
-                }
-              });
+              ["content-length", "accept-ranges", "content-range"].forEach(
+                (header) => {
+                  if (res.headers[header]) {
+                    response.header(header, res.headers[header] as string);
+                  }
+                },
+              );
 
               resolve(response);
             });
@@ -395,17 +410,20 @@ export const liveRoutes: ServerRoute[] = [
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logger.error(`[Player] Error fetching segment: ${message}`);
-          return h.response(`[Player] Error fetching segment: ${message}`).code(502); // 502 Bad Gateway is more appropriate here
+          return h
+            .response(`[Player] Error fetching segment: ${message}`)
+            .code(502);
         }
-
       } catch (err: any) {
         console.error("[Player] Detailed Error:", err);
         logger.error(`[Player] Error fetching segment: ${err.message || err}`);
 
-        return h.response({
-          error: "Internal Server Error",
-          details: err.message || "Unknown error occurred"
-        }).code(500);
+        return h
+          .response({
+            error: "Internal Server Error",
+            details: err.message || "Unknown error occurred",
+          })
+          .code(500);
       }
     },
   },
