@@ -113,7 +113,7 @@ const init = async () => {
 
   const { backgroundJobService } =
     await import("./services/BackgroundJobService");
-  backgroundJobService.start();
+  // backgroundJobService.start();
 
   logger.info(`Server running at: ${server.info.uri}`);
 };

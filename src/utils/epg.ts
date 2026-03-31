@@ -50,79 +50,59 @@ export async function getEpgCache(): Promise<EpgCache | null> {
 export async function fetchAndCacheEpg(): Promise<EpgCache> {
   console.log("Fetching fresh EPG data...");
 
-  const activeProfile = await ConfigProfile.findOne({
-    where: { isActive: true },
-  });
+  const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
   const profileId = activeProfile?.id;
 
-  const channels = await readChannels(profileId);
-  const genres = await readGenres("channel", profileId);
+  const [channels, genres] = await Promise.all([
+    readChannels(profileId),
+    readGenres("channel", profileId)
+  ]);
+
+  // FIX 1: Use a Map for O(1) lookup instead of .find() inside .filter()
+  const genreMap = new Map(genres.map(g => [g.id, g.title]));
+  const groupSet = new Set(initialConfig.groups);
 
   const filteredChannels = channels.filter((channel) => {
-    const genre = genres.find((r) => r.id === channel.tv_genre_id);
-    return genre && initialConfig.groups.includes(genre.title);
+    const genreTitle = genreMap.get(channel.tv_genre_id);
+    return genreTitle && groupSet.has(genreTitle);
   });
 
-  const CONCURRENCY_LIMIT = 10;
-  const DELAY_BETWEEN_CHUNKS = 1000;
-  const results: { id: string; epg: EPG_List[] }[] = [];
+  const CONCURRENCY_LIMIT = 5; // Reduced slightly to give CPU breathing room
+  const epgData: Record<string, EPG_List[]> = {}; // Directly push to final object
 
-  const delay = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
-
-  console.log(
-    `Starting EPG fetch for ${filteredChannels.length} channels in batches of ${CONCURRENCY_LIMIT}...`,
-  );
+  console.log(`Starting EPG fetch for ${filteredChannels.length} channels...`);
 
   for (let i = 0; i < filteredChannels.length; i += CONCURRENCY_LIMIT) {
     const chunk = filteredChannels.slice(i, i + CONCURRENCY_LIMIT);
 
-    const chunkPromises = chunk.map((channel) =>
-      serverManager
-        .getProvider()
-        .getEPG(channel.id)
-        .then(
-          (epg) => ({
-            id: channel.id,
-            epg: epg.js || [],
-          }),
-          (error) => {
-            console.error(
-              `Failed to fetch EPG for channel ${channel.id}:`,
-              error.message || error,
-            );
-            return {
-              id: channel.id,
-              epg: [],
-            };
-          },
-        ),
+    const chunkResults = await Promise.all(
+      chunk.map(async (channel) => {
+        try {
+          const epg = await serverManager.getProvider().getEPG(channel.id);
+          return { id: channel.id, epg: epg.js || [] };
+        } catch (error) {
+          console.error(`Error for ${channel.id}:`, error);
+          return { id: channel.id, epg: [] };
+        }
+      })
     );
 
-    const chunkResults = await Promise.all(chunkPromises);
-    results.push(...chunkResults);
+    // FIX 2: Merge results into epgData immediately
+    for (const res of chunkResults) {
+      epgData[res.id] = res.epg;
+    }
 
+    // FIX 3: THE MAGIC STICK - Yield control back to Event Loop
+    await new Promise(resolve => setImmediate(resolve));
+    
     if (i + CONCURRENCY_LIMIT < filteredChannels.length) {
-      await delay(DELAY_BETWEEN_CHUNKS);
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
 
-  const epgData = results.reduce<Record<string, EPG_List[]>>((acc, curr) => {
-    acc[curr.id] = curr.epg;
-    return acc;
-  }, {});
+  const cache: EpgCache = { timestamp: new Date(), data: epgData };
+  await writeEpgCache(cache, profileId);
 
-  const cache: EpgCache = {
-    timestamp: new Date(),
-    data: epgData,
-  };
-
-  try {
-    await writeEpgCache(cache, profileId);
-  } catch (error) {
-    console.error("Failed to write EPG cache:", error);
-  }
-
-  console.log(`EPG cache updated with data for ${results.length} channels.`);
+  console.log("EPG cache updated.");
   return cache;
 }

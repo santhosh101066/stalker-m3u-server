@@ -206,7 +206,7 @@ export const stalkerV2: ServerRoute[] = [
           total_items: channels.length,
           actual_length: channels.length,
           total_loaded: channels.length,
-          data: channels,
+          data: channels.sort((a, b) => a.title.localeCompare(b.title)),
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };

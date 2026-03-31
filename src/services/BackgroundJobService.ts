@@ -4,7 +4,7 @@ import { logger } from "@/utils/logger";
 
 const EPG_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const IDLE_THRESHOLD_MS = 2 * 60 * 1000;
-const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
 class BackgroundJobService {
   private interval: NodeJS.Timeout | null = null;
@@ -28,15 +28,22 @@ class BackgroundJobService {
   }
 
   private async runJobs() {
+    const memory = process.memoryUsage().heapUsed / 1024 / 1024;
+    logger.info(`[BackgroundJobService] Checking jobs... Current RAM: ${Math.round(memory)}MB`);
     try {
+      console.time("EPG_FETCH_TIME");
       await this.checkAndUpdateEpg();
+      console.timeEnd("EPG_FETCH_TIME");
     } catch (err) {
       logger.error(`[BackgroundJobService] Error running jobs: ${err}`);
     }
   }
 
   private async checkAndUpdateEpg() {
-    if (this.isUpdatingEpg) return;
+    if (this.isUpdatingEpg) {
+      logger.warn("[BackgroundJobService] Previous EPG fetch still in progress. Skipping...");
+      return;
+    }
 
     const cache = await getEpgCache();
     const now = Date.now();

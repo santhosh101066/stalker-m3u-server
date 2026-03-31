@@ -53,6 +53,7 @@ async function populateCache(cmd: string): Promise<void> {
 
     const masterRes = await axios.get(masterUrl, {
       headers: { "User-Agent": "VLC/3.0.18" },
+      timeout: 5000
     });
 
     const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);

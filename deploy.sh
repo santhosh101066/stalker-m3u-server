@@ -23,12 +23,16 @@ for arg in "$@"; do
       ;;
     --arch=*)
       ARCH="${arg#*=}"
+      PLATFORM_FLAG="--platform $ARCH"
       shift
+      ;;
+    deploy|restart|logs)
+      COMMAND="$arg"
       ;;
   esac
 done
 
-COMMAND="$1"
+COMMAND="${COMMAND:-deploy}"
 
 # --- Helper Functions ---
 function build_and_push() {
