@@ -5,12 +5,16 @@ import { serverManager } from "../serverManager";
 import { getInitialConfig, initialConfig } from "@/config/server";
 import { stalkerApi } from "@/utils/stalker";
 import { ConfigProfile } from "@/models/ConfigProfile";
+import crypto from "crypto";
+import { socketService } from "@/services/SocketService";
+import { createJWT, authCheck } from "@/utils/jwt";
 
 export const configRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/api/config",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       return initialConfig;
     },
   },
@@ -18,12 +22,15 @@ export const configRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/config",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const newConfig = request.payload as any;
 
         const activeProfile = await ConfigProfile.findOne({
           where: { isActive: true },
         });
+
+        let finalConfig = activeProfile ? { ...activeProfile.config } : newConfig;
 
         if (activeProfile) {
           const updatedConfig = { ...activeProfile.config, ...newConfig };
@@ -33,6 +40,7 @@ export const configRoutes: ServerRoute[] = [
           }
 
           activeProfile.config = updatedConfig;
+          finalConfig = updatedConfig;
           await activeProfile.save();
           console.log(
             `Updated configuration for active profile: ${activeProfile.name}`,
@@ -44,17 +52,21 @@ export const configRoutes: ServerRoute[] = [
         }
 
         try {
-          serverManager.restartServer();
+          await serverManager.reloadConfig();
           stalkerApi.clearCache();
 
+          const hash = crypto.createHash("md5").update(JSON.stringify(finalConfig)).digest("hex");
+          socketService.broadcastConfigChange(hash);
+
           return {
-            message: "Configuration updated and server restarted successfully.",
+            message: "Configuration updated and reloaded successfully.",
+            hash
           };
         } catch (error) {
-          console.error("Error restarting server:", error);
+          console.error("Error reloading server config:", error);
           return h
             .response({
-              error: "Configuration updated but server restart failed",
+              error: "Configuration updated but server reload failed",
               details: error,
             })
             .code(500);
@@ -78,7 +90,8 @@ export const configRoutes: ServerRoute[] = [
         const expectedPassword = process.env.ADMIN_PASSWORD || "admin";
 
         if (providedPassword === expectedPassword) {
-          return { success: true };
+          const token = createJWT({ role: "admin" });
+          return { success: true, token };
         } else {
           return h.response({ error: "Invalid password" }).code(401);
         }

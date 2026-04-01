@@ -22,6 +22,8 @@ class ServerManager {
 
   initProvider() {
     if (initialConfig.providerType === "xtream") {
+      stalkerApi.stopWatchdog();
+      stalkerApi.clearCache();
       this.provider = new XtreamClient();
       logger.info("Initialized Xtream Codes Provider");
     } else {
@@ -39,6 +41,17 @@ class ServerManager {
 
   setServer(server: Server) {
     this.server = server;
+  }
+
+  async reloadConfig() {
+    try {
+      await loadActiveProfileFromDB();
+      this.initProvider();
+      logger.info("Configuration reloaded without restarting server");
+    } catch (error) {
+      logger.error(`Failed to reload config: ${error}`);
+      throw error;
+    }
   }
 
   async restartServer() {

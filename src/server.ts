@@ -13,7 +13,6 @@ import { proxy } from "./routes/proxy";
 import { stalkerApi } from "./utils/stalker";
 import { portalProxy } from "./routes/portalProxy";
 import { xtreamRoutes } from "./routes/xtream";
-import { streamRoutes } from "./routes/stream";
 import { vodRoutes } from "./routes/vod";
 import { socketService } from "./services/SocketService";
 
@@ -58,7 +57,6 @@ const init = async () => {
   server.route(proxy);
   server.route(portalProxy);
   server.route(xtreamRoutes);
-  server.route(streamRoutes);
   server.route(vodRoutes);
 
   server.route({

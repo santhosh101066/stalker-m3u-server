@@ -88,7 +88,7 @@ export class XtreamClient implements IProvider {
     const channels: Channel[] = data.map((item: any) => ({
       id: item.stream_id,
       name: item.name,
-      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/live/${this.username}/${this.password}/${item.stream_id}.ts`,
+      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/live/${this.username}/${this.password}/${item.stream_id}.m3u8`,
       number: item.num,
       logo: item.stream_icon,
       tv_genre_id: item.category_id,

@@ -11,12 +11,16 @@ import { stalkerApi } from "@/utils/stalker";
 import { Channel } from "@/models/Channel";
 import { Genre } from "@/models/Genre";
 import { EpgCache } from "@/models/EpgCache";
+import crypto from "crypto";
+import { socketService } from "@/services/SocketService";
+import { authCheck } from "@/utils/jwt";
 
 export const profileRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/api/profiles",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profiles = await ConfigProfile.findAll({
           order: [["createdAt", "DESC"]],
@@ -33,6 +37,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "GET",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -53,6 +58,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const payload = request.payload as CreateProfileRequest;
         const safeName = payload.name?.trim();
@@ -92,6 +98,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "PUT",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
         const payload = request.payload as UpdateProfileRequest;
@@ -126,13 +133,16 @@ export const profileRoutes: ServerRoute[] = [
 
         if (profile.isActive && payload.config) {
           console.log(
-            "Active profile updated. Reloading config & Restarting server...",
+            "Active profile updated. Reloading config without restart...",
           );
 
           await loadActiveProfileFromDB();
 
-          serverManager.restartServer();
+          await serverManager.reloadConfig();
           stalkerApi.clearCache();
+
+          const hash = crypto.createHash("md5").update(JSON.stringify(payload.config)).digest("hex");
+          socketService.broadcastConfigChange(hash);
         }
 
         return profile;
@@ -147,6 +157,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "DELETE",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -186,18 +197,23 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/activate",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
 
         const profile = await switchProfile(profileId);
 
-        console.log("Switching profile. Restarting server...");
-        serverManager.restartServer();
+        console.log("Switching profile. Reloading config without restart...");
+        await serverManager.reloadConfig();
         stalkerApi.clearCache();
 
+        const hash = crypto.createHash("md5").update(JSON.stringify(profile.config)).digest("hex");
+        socketService.broadcastConfigChange(hash);
+
         return {
-          message: `Switched to profile "${profile.name}". Server restarting...`,
+          message: `Switched to profile "${profile.name}". Configuration reloaded.`,
           profile,
+          hash
         };
       } catch (error: any) {
         console.error("Error activating profile:", error);
@@ -212,6 +228,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/enable",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -235,6 +252,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/disable",
     handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);

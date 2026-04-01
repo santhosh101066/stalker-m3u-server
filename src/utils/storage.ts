@@ -39,8 +39,10 @@ export async function writeChannels(
       await Channel.destroy({ where: { profileId } });
     }
 
+    const prefix = profileId !== undefined ? `${profileId}_` : ``;
     const channelsToInsert = channels.map((channel) => ({
       ...channel,
+      id: `${prefix}${channel.id}`,
       profileId: profileId !== undefined ? profileId : null,
     }));
 
@@ -67,7 +69,11 @@ export async function readChannels(profileId?: number): Promise<any[]> {
       where: profileId !== undefined ? { profileId } : {},
       raw: true,
     });
-    return channels;
+    const prefix = profileId !== undefined ? `${profileId}_` : ``;
+    return channels.map(c => ({
+      ...c,
+      id: prefix ? c.id.replace(new RegExp(`^${prefix}`), "") : c.id
+    }));
   } catch (error) {
     console.error("Error reading channels from database:", error);
     return [];
@@ -88,9 +94,10 @@ export async function writeGenres(
       await Genre.destroy({ where: { type } });
     }
 
+    const prefix = profileId !== undefined ? `${profileId}_` : ``;
     const genresToInsert = genres.map((genre) => ({
       ...genre,
-      id: `${type}_${genre.id}`,
+      id: `${prefix}${type}_${genre.id}`,
       type,
       profileId: profileId !== undefined ? profileId : null,
     }));
@@ -124,9 +131,10 @@ export async function readGenres(
       raw: true,
     });
 
+    const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return genres.map((g) => ({
       ...g,
-      id: g.id.replace(`${type}_`, ""),
+      id: g.id.replace(new RegExp(`^${prefix}${type}_`), "").replace(new RegExp(`^${type}_`), ""),
     }));
   } catch (error) {
     console.error(`Error reading ${type} genres from database:`, error);

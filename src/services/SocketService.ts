@@ -126,6 +126,10 @@ class SocketService {
   public broadcastLog(level: string, message: string, timestamp: string) {
     this.io?.to("logging").emit("server_log", { level, message, timestamp });
   }
+
+  public broadcastConfigChange(hash: string) {
+    this.io?.emit("config_changed", { timestamp: Date.now(), hash });
+  }
 }
 
 export const socketService = new SocketService();

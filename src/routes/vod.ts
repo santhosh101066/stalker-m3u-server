@@ -1,7 +1,6 @@
 import { ServerRoute } from "@hapi/hapi";
 import { serverManager } from "@/serverManager";
 import axios from "axios";
-import { hlsTranscoder } from "@/utils/hls-transcoder";
 import { logger } from "@/utils/logger";
 
 export const vodRoutes: ServerRoute[] = [

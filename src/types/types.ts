@@ -46,7 +46,7 @@ export interface AppConfig {
     secretKey: string;
   };
 }
-export type StreamTester = "http" | "ffmpeg";
+export type StreamTester = "http";
 
 export type GenerationKind = "iptv" | "vod" | "series";
 export const generationKindNames = ["iptv", "vod", "series"] as string[];
