@@ -27,7 +27,9 @@ export interface IProvider {
     series: string;
     id: number;
     download: number;
+    category?: string;
   }): Promise<any>;
+  getVodLinkByCmd(cmd: string, series?: number): Promise<any>;
 
   getSeriesGroups(): Promise<Data<Genre[]>>;
   getSeries(params: MoviesApiParams): Promise<Data<Programs<Video>>>;

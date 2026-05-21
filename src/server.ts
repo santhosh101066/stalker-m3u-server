@@ -18,6 +18,8 @@ import { socketService } from "./services/SocketService";
 
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
+import { loadPlaylistCache } from "./utils/getM3uUrls";
+import { warmVodCache, warmSeriesCache, warmSeriesInfoCache } from "./routes/xtream";
 import { logger } from "./utils/logger";
 
 const init = async () => {
@@ -26,6 +28,7 @@ const init = async () => {
   await migrateToProfiles();
 
   await loadActiveProfileFromDB();
+  await loadPlaylistCache();
 
   const server = Hapi.server({
     ...serverConfig,
@@ -91,12 +94,14 @@ const init = async () => {
   });
 
   server.events.on("response", function (request) {
+    const qs = request.url.search || "";
     logger.info(
       request.info.remoteAddress +
         ": " +
         request.method.toUpperCase() +
         " " +
         request.path +
+        qs +
         " --> " +
         (request.response &&
         typeof (request.response as any).statusCode === "number"
@@ -114,6 +119,24 @@ const init = async () => {
   // backgroundJobService.start();
 
   logger.info(`Server running at: ${server.info.uri}`);
+
+  // Warm xtream caches in background on startup
+  warmVodCache().catch((e) => logger.error(`[warmVodCache] ${e}`));
+  warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache] ${e}`));
+  warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache] ${e}`));
+
+  // Re-warm all xtream caches every 24 hours
+  setInterval(() => {
+    warmVodCache().catch((e) => logger.error(`[warmVodCache interval] ${e}`));
+  }, 24 * 60 * 60 * 1000);
+
+  setInterval(() => {
+    warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache interval] ${e}`));
+  }, 24 * 60 * 60 * 1000);
+
+  setInterval(() => {
+    warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache interval] ${e}`));
+  }, 24 * 60 * 60 * 1000);
 };
 
 process.on("unhandledRejection", (err) => {

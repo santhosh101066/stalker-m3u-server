@@ -72,7 +72,7 @@ export async function readChannels(profileId?: number): Promise<any[]> {
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return channels.map(c => ({
       ...c,
-      id: prefix ? c.id.replace(new RegExp(`^${prefix}`), "") : c.id
+      id: c.id.replace(/^\d+_/, "")
     }));
   } catch (error) {
     console.error("Error reading channels from database:", error);
@@ -134,7 +134,7 @@ export async function readGenres(
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return genres.map((g) => ({
       ...g,
-      id: g.id.replace(new RegExp(`^${prefix}${type}_`), "").replace(new RegExp(`^${type}_`), ""),
+      id: g.id.replace(new RegExp(`^\\d+_${type}_`), "").replace(new RegExp(`^${type}_`), ""),
     }));
   } catch (error) {
     console.error(`Error reading ${type} genres from database:`, error);
