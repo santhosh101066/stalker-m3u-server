@@ -56,6 +56,9 @@ const AppConfigDefault: AppConfig = {
 export const initialConfig: Config = { ...ConfigDefault };
 export const appConfig: AppConfig = { ...AppConfigDefault };
 
+// Field name on VOD items that marks them as series (value == 1 means series)
+export const seriesFlag = process.env.SERIES_FLAG || "is_series";
+
 export function getInitialConfig() {
   return initialConfig;
 }

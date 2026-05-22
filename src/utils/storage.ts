@@ -72,7 +72,7 @@ export async function readChannels(profileId?: number): Promise<any[]> {
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return channels.map(c => ({
       ...c,
-      id: prefix ? c.id.replace(new RegExp(`^${prefix}`), "") : c.id
+      id: c.id.replace(/^\d+_/, "")
     }));
   } catch (error) {
     console.error("Error reading channels from database:", error);
@@ -118,6 +118,43 @@ export async function writeGenres(
   }
 }
 
+export async function upsertGenres(
+  genres: any[],
+  type: GenreType,
+  profileId?: number,
+): Promise<void> {
+  const prefix = profileId !== undefined ? `${profileId}_` : ``;
+  const rows = genres.map((genre) => ({
+    ...genre,
+    id: `${prefix}${type}_${genre.id}`,
+    type,
+    profileId: profileId !== undefined ? profileId : null,
+  }));
+  await Genre.bulkCreate(rows, {
+    updateOnDuplicate: ["title", "number", "alias", "censored", "type", "profileId"],
+  });
+}
+
+export async function upsertGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.upsert({
+    id: `${prefix}${type}_${genre.id}`,
+    title: genre.title,
+    number: genre.number ?? null,
+    alias: genre.alias ?? null,
+    censored: genre.censored ?? 0,
+    type,
+    profileId,
+  });
+}
+
+export async function deleteGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.destroy({ where: { id: `${prefix}${type}_${genre.id}` } });
+}
+
 export async function readGenres(
   type: GenreType,
   profileId?: number,
@@ -134,7 +171,7 @@ export async function readGenres(
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return genres.map((g) => ({
       ...g,
-      id: g.id.replace(new RegExp(`^${prefix}${type}_`), "").replace(new RegExp(`^${type}_`), ""),
+      id: g.id.replace(new RegExp(`^\\d+_${type}_`), "").replace(new RegExp(`^${type}_`), ""),
     }));
   } catch (error) {
     console.error(`Error reading ${type} genres from database:`, error);

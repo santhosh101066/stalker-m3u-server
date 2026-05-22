@@ -220,10 +220,10 @@ export class XtreamClient implements IProvider {
           if (Array.isArray(seasonEpisodes)) {
             seasonEpisodes.forEach((ep: any) => {
               episodes.push({
-                id: ep.id,
+		id: ep.id,
                 name: ep.title || `Episode ${ep.episode_num}`,
-                cmd: `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
-                screenshot_uri: ep.info?.movie_image || data.info?.cover,
+		cmd: `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
+		screenshot_uri: ep.info?.movie_image || data.info?.cover,
                 category_id: data.info?.category_id,
                 time: ep.info?.duration_secs
                   ? Math.floor(parseInt(ep.info.duration_secs) / 60)
@@ -308,6 +308,10 @@ export class XtreamClient implements IProvider {
         cmd: url,
       },
     };
+  }
+
+  async getVodLinkByCmd(cmd: string, series: number = 0): Promise<any> {
+    return { js: { cmd } };
   }
 
   isIdle(thresholdMs: number = 30000) {

@@ -59,13 +59,16 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
   ]);
 
   // FIX 1: Use a Map for O(1) lookup instead of .find() inside .filter()
-  const genreMap = new Map(genres.map(g => [g.id, g.title]));
-  const groupSet = new Set(initialConfig.groups);
-
-  const filteredChannels = channels.filter((channel) => {
-    const genreTitle = genreMap.get(channel.tv_genre_id);
-    return genreTitle && groupSet.has(genreTitle);
-  });
+  const filteredChannels = initialConfig.groups.length === 0
+    ? channels
+    : (() => {
+        const genreMap = new Map(genres.map(g => [g.id, g.title]));
+        const groupSet = new Set(initialConfig.groups);
+        return channels.filter((channel) => {
+          const genreTitle = genreMap.get(channel.tv_genre_id);
+          return genreTitle && groupSet.has(genreTitle);
+        });
+      })();
 
   const CONCURRENCY_LIMIT = 5; // Reduced slightly to give CPU breathing room
   const epgData: Record<string, EPG_List[]> = {}; // Directly push to final object

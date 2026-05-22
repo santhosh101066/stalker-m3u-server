@@ -39,7 +39,7 @@ async function httpRequest<T = any>(
     })
     .then((res) => {
       if (res.status !== 200) {
-        throw new Error(`Request failed with status ${res.status}`);
+        throw new Error(`Request failed with status ${res.status} for URL: ${url}`);
       }
       return res.data;
     });
@@ -577,6 +577,19 @@ export class StalkerAPI implements IProvider {
     });
   }
 
+  async getSeriesGroups() {
+    const response = await this.makeRequest<any>(this.getPhpUrl(), {
+      type: "series",
+      action: "get_categories",
+    });
+    // Portal may return { js: [...] } or { js: { data: [...] } }
+    const raw = response?.js;
+    const arr: Genre[] = Array.isArray(raw) ? raw
+      : Array.isArray(raw?.data) ? raw.data
+      : [];
+    return { js: arr } as Data<Genre[]>;
+  }
+
   async getMovies({
     category,
     page,
@@ -647,55 +660,36 @@ export class StalkerAPI implements IProvider {
     );
   }
 
-  async getMovieLink({
-    series,
-    id,
-    download = 0,
-  }: {
-    series: string;
-    id: number;
-    download: number;
-  }) {
-    const params = {
+async getMovieLink({ series, id, download = 0 }: { series: string; id: number; download: number; category?: string }) {
+  const params = {
+    type: "vod",
+    action: "create_link",
+    force_ch_link_check: "0",
+    disable_ad: "0",
+    download: 0,
+    forced_storage: "",
+    series: Number(series),
+    cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
+  };
+
+  return this.makeRequest<Data<Programs<Video>>>("/server/load.php", params);
+}
+
+  async getVodLinkByCmd(cmd: string, series: number = 0): Promise<any> {
+    return this.makeRequest<any>("/server/load.php", {
       type: "vod",
       action: "create_link",
+      cmd,
+      series,
       force_ch_link_check: "0",
       disable_ad: "0",
       download: 0,
       forced_storage: "",
-      series: Number(series),
-      cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
-    };
-
-    return this.makeRequest<Data<Programs<Video>>>("/server/load.php", params);
-  }
-
-  async getSeriesLink({
-    series,
-    id,
-    download = 0,
-  }: {
-    series: string;
-    id: number;
-    download: number;
-  }) {
-    return this.makeRequest<Data<Programs<Video>>>(this.getPhpUrl(), {
-      type: "series",
-      action: "create_link",
-      force_ch_link_check: "0",
-      disable_ad: "0",
-      download,
-      forced_stop_range: "",
-      series: series,
-      cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
     });
   }
 
-  async getSeriesGroups() {
-    return this.makeRequest<Data<Genre[]>>(this.getPhpUrl(), {
-      type: "series",
-      action: "get_categories",
-    });
+  async getSeriesLink(params: { series: string; id: number; download: number }): Promise<any> {
+    return this.getMovieLink({ series: params.series, id: params.id, download: params.download });
   }
 
   async getEPG(channelId: string) {

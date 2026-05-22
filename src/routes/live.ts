@@ -4,8 +4,7 @@ import { ServerRoute } from "@hapi/hapi";
 import { http, https } from "follow-redirects";
 import { RequestOptions } from "https";
 import NodeCache from "node-cache";
-import { appConfig, initialConfig } from "@/config/server";
-import { ReqRefDefaults, ResponseToolkit } from "@hapi/hapi/lib/types";
+import { appConfig } from "@/config/server";
 import { stalkerApi } from "@/utils/stalker";
 import { logger } from "@/utils/logger";
 
@@ -96,21 +95,6 @@ async function populateCache(cmd: string): Promise<void> {
 
   pendingCommands.set(cmd, promise);
   await promise;
-}
-
-async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
-  try {
-    const redirectedUrl = await cmdPlayerV2(cmd);
-    if (redirectedUrl) {
-      return h.redirect(redirectedUrl).code(302);
-    }
-    return h
-      .response({ error: "Unable to fetch stream [Non Proxy]" })
-      .code(400);
-  } catch (err) {
-    logger.error(`Non-proxy error: ${err}`);
-    return h.response({ error: "Stream fetch failed" }).code(500);
-  }
 }
 
 async function handleProxy(cmd: string, play: string | undefined, h: any) {
@@ -268,17 +252,26 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
-      const { cmd, play, id } = request.query as {
+      const { cmd, id, proxy } = request.query as {
         cmd?: string;
-        play?: string;
         id?: string;
+        proxy?: string;
       };
       if (!cmd) return h.response({ error: "Missing cmd parameter" }).code(400);
-      if (id) {
-        stalkerApi.setActiveChannel(id);
+      if (id) stalkerApi.setActiveChannel(id);
+      try {
+        const cdnUrl = await cmdPlayerV2(cmd);
+        if (!cdnUrl) return h.response({ error: "Stream not found" }).code(404);
+        // Browser sends proxy=1 and needs /api/proxy for CORS; native apps redirect directly
+        if (proxy === "1") {
+          const b64 = Buffer.from(cdnUrl).toString("base64");
+          return h.redirect(`/api/proxy?url=${b64}`).code(302);
+        }
+        return h.redirect(cdnUrl).code(302);
+      } catch (err: any) {
+        logger.error(`[live.m3u8] ${err.message}`);
+        return h.response({ error: err.message }).code(500);
       }
-      if (initialConfig.proxy) return handleProxy(cmd, play, h);
-      return handleNonProxy(cmd, h);
     },
   },
   {
