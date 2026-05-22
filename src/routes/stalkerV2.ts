@@ -307,7 +307,11 @@ export const stalkerV2: ServerRoute[] = [
           const cachedMovies = await xtreamCache.get<any[]>(`vod_streams_${category}`);
           if (cachedMovies && cachedMovies.length > 0) {
             const offset = (startApiPage - 1) * itemsPerApiPage;
-            firstPageData = cachedMovies.slice(offset, offset + itemsPerApiPage);
+            // Cache items are in Xtream format (stream_id); browser uses item.id for navigation
+            firstPageData = cachedMovies.slice(offset, offset + itemsPerApiPage).map((m: any) => ({
+              ...m,
+              id: String(m.stream_id),
+            }));
             const actualTotalItems = cachedMovies.length;
             return {
               success: true,
@@ -438,7 +442,12 @@ export const stalkerV2: ServerRoute[] = [
           const cachedSeries = await xtreamCache.get<any[]>(`series_list_${category}`);
           if (cachedSeries && cachedSeries.length > 0) {
             const offset = (startApiPage - 1) * itemsPerApiPage;
-            const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage);
+            // Cache items are in Xtream format (series_id); browser uses item.id for navigation
+            const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage).map((s: any) => ({
+              ...s,
+              id: String(s.series_id),
+              is_series: 1,
+            }));
             return {
               success: true,
               page: Number(page),
