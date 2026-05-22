@@ -3,9 +3,6 @@ dist
 .git
 .DS_Store
 *.log
-stalker-m3u-server-data
 *.env
 stalker-m3u-server.env
 compose.override.yml
-database.sqlite
-database.db

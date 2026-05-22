@@ -28,7 +28,6 @@ dist
 stalker-m3u-server.tar
 .mem
 token.json
-database.sqlite
 
 # Local deployment data (contains credentials and user data)
 stalker-m3u-server.env
