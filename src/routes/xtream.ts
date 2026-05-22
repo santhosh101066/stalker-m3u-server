@@ -4,7 +4,7 @@ import { XtreamCache } from "@/models/XtreamCache";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
 import { initialConfig } from "@/config/server";
-import { readGenres, readChannels } from "@/utils/storage";
+import { readGenres, readChannels, upsertGenre, deleteGenre } from "@/utils/storage";
 import { cmdPlayerV2 } from "@/utils/cmdPlayer";
 import { stalkerApi } from "@/utils/stalker";
 import { getEpgCache } from "@/utils/epg";
@@ -210,6 +210,9 @@ export async function warmSeriesCache(): Promise<void> {
         const newMovies = isNativeSeries ? [] : newRaw.filter((i: any) => i.is_series != 1);
 
         if (newSeries.length === 0 && newMovies.length === 0) {
+          if (!isNativeSeries && cachedMovies.length > 0) {
+            await upsertGenre(genre, "movie"); // keep genre registered
+          }
           logger.info(`[XtreamSeries] ${cacheKey}: up to date, skipping`);
           continue;
         }
@@ -231,12 +234,16 @@ export async function warmSeriesCache(): Promise<void> {
           ];
           await xtreamCache.set(vodKey, result);
           logger.info(`[XtreamSeries] ${vodKey}: ${cachedMovies.length === 0 ? "warmed" : "added"} ${newMovies.length} movies (total=${result.length})`);
+          // Category has movies — register it in movie genres so it's visible in the VOD section
+          if (!isNativeSeries) await upsertGenre(genre, "movie");
+
         }
 
       } catch (e: any) {
         logger.error(`[XtreamSeries] Failed to warm ${cacheKey}: ${e.message}`);
       }
     }
+
   } finally { seriesWarmRunning = false; }
 }
 
@@ -596,6 +603,53 @@ export async function catchupScan(): Promise<void> {
   }
 }
 
+export async function cleanupGenres(): Promise<void> {
+  const movieGenres = await readGenres("movie");
+  const seriesGenres = await readGenres("series");
+
+  for (const genre of movieGenres) {
+    if (!genre.id || genre.id === "*") continue;
+    const vodCached = await xtreamCache.get<any[]>(`vod_streams_${genre.id}`);
+    const seriesCached = await xtreamCache.get<any[]>(`series_list_${genre.id}`);
+    // Delete if vod cache is explicitly empty, or if vod is missing but series has data (confirmed series-only)
+    const shouldDelete = (vodCached !== undefined && vodCached.length === 0) ||
+                         (vodCached === undefined && seriesCached !== undefined && seriesCached.length > 0);
+    if (shouldDelete) {
+      await deleteGenre(genre, "movie");
+      logger.info(`[Cleanup] Removed movie genre ${genre.id} (${genre.title}) from movie genres`);
+    }
+  }
+
+  for (const genre of seriesGenres) {
+    if (!genre.id || genre.id === "*") continue;
+    const seriesCached = await xtreamCache.get<any[]>(`series_list_${genre.id}`);
+    const vodCached = await xtreamCache.get<any[]>(`vod_streams_${genre.id}`);
+    // Delete if series cache is explicitly empty, or if series is missing but vod has data (confirmed movies-only)
+    const noSeriesData = (seriesCached !== undefined && seriesCached.length === 0) ||
+                         (seriesCached === undefined && vodCached !== undefined && vodCached.length > 0);
+    if (noSeriesData) {
+      await deleteGenre(genre, "series");
+      logger.info(`[Cleanup] Removed series genre ${genre.id} (${genre.title}) from series genres — no series data`);
+      continue;
+    }
+    // If series exist, check if any have episodes — skip if series_info not yet populated
+    if (seriesCached && seriesCached.length > 0) {
+      let hasAnyEpisodes = false;
+      let allInfoAvailable = true;
+      for (const series of seriesCached) {
+        const info = await xtreamCache.get<any>(`series_info_${series.series_id}`);
+        if (info === undefined) { allInfoAvailable = false; break; }
+        const totalEps = Object.values(info.episodes || {}).reduce((sum: number, eps: any) => sum + (Array.isArray(eps) ? eps.length : 0), 0);
+        if (totalEps > 0) { hasAnyEpisodes = true; break; }
+      }
+      if (allInfoAvailable && !hasAnyEpisodes) {
+        await deleteGenre(genre, "series");
+        logger.info(`[Cleanup] Removed series genre ${genre.id} (${genre.title}) from series genres — all series have 0 episodes`);
+      }
+    }
+  }
+}
+
 export async function warmVodCache(): Promise<void> {
   if (vodWarmRunning) { logger.info("[XtreamVod] Warm already running, skipping"); return; }
   vodWarmRunning = true;
@@ -625,6 +679,25 @@ export async function warmVodCache(): Promise<void> {
         const newSeries = newRaw.filter((i: any) => i.is_series == 1);
 
         if (newMovies.length === 0 && newSeries.length === 0) {
+          // vod_streams up to date — but check if series were ever discovered for this category
+          if (existingSeries === undefined) {
+            // First time: full scan to find any series buried in the category
+            const seriesKey = `series_list_${genre.id}`;
+            const allItems = await fetchAllPages(async (page) => {
+              const res = await provider.getMovies({ category: genre.id, page });
+              return res?.js?.data || [];
+            });
+            const seriesItems = allItems.filter((i: any) => i.is_series == 1);
+            if (seriesItems.length > 0) {
+              await xtreamCache.set(seriesKey, seriesItems.map((s: any, idx: number) => mapSeriesItem(s, idx + 1, genre.id)));
+              await upsertGenre(genre, "series");
+              logger.info(`[XtreamVOD] ${seriesKey}: discovered ${seriesItems.length} series (first scan)`);
+            } else {
+              await xtreamCache.set(seriesKey, []); // mark as scanned so we don't re-scan next time
+            }
+          } else if (existingSeries.length > 0) {
+            await upsertGenre(genre, "series"); // keep genre registered
+          }
           logger.info(`[XtreamVOD] ${cacheKey}: up to date, skipping`);
           continue;
         }
@@ -646,12 +719,16 @@ export async function warmVodCache(): Promise<void> {
           ];
           await xtreamCache.set(seriesKey, result);
           logger.info(`[XtreamVOD] ${seriesKey}: ${(existingSeries || []).length === 0 ? "warmed" : "added"} ${newSeries.length} series (total=${result.length})`);
+          // Category has series — register it in series genres so it's visible in the series section
+          await upsertGenre(genre, "series");
+
         }
 
       } catch (e: any) {
         logger.error(`[XtreamVOD] Failed to warm ${cacheKey}: ${e.message}`);
       }
     }
+
   } finally { vodWarmRunning = false; }
 }
 

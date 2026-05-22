@@ -118,6 +118,43 @@ export async function writeGenres(
   }
 }
 
+export async function upsertGenres(
+  genres: any[],
+  type: GenreType,
+  profileId?: number,
+): Promise<void> {
+  const prefix = profileId !== undefined ? `${profileId}_` : ``;
+  const rows = genres.map((genre) => ({
+    ...genre,
+    id: `${prefix}${type}_${genre.id}`,
+    type,
+    profileId: profileId !== undefined ? profileId : null,
+  }));
+  await Genre.bulkCreate(rows, {
+    updateOnDuplicate: ["title", "number", "alias", "censored", "type", "profileId"],
+  });
+}
+
+export async function upsertGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.upsert({
+    id: `${prefix}${type}_${genre.id}`,
+    title: genre.title,
+    number: genre.number ?? null,
+    alias: genre.alias ?? null,
+    censored: genre.censored ?? 0,
+    type,
+    profileId,
+  });
+}
+
+export async function deleteGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.destroy({ where: { id: `${prefix}${type}_${genre.id}` } });
+}
+
 export async function readGenres(
   type: GenreType,
   profileId?: number,

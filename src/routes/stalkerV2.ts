@@ -5,6 +5,7 @@ import {
   writeChannels,
   readGenres,
   writeGenres,
+  upsertGenres,
 } from "@/utils/storage";
 import { initialConfig } from "@/config/server";
 import { serverManager } from "@/serverManager";
@@ -14,7 +15,7 @@ import { ConfigProfile } from "@/models/ConfigProfile";
 import { stalkerApi } from "@/utils/stalker";
 import { Readable } from "stream";
 import { XtreamCache } from "@/models/XtreamCache";
-import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, catchupScan, xtreamCache } from "@/routes/xtream";
+import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres, catchupScan, xtreamCache } from "@/routes/xtream";
 import { logger } from "@/utils/logger";
 
 const getActiveProfileId = async () => {
@@ -178,20 +179,10 @@ export const stalkerV2: ServerRoute[] = [
           (ch: any) => initialConfig.playCensored || ch.censored != 1,
         );
 
-        const movieCats: any[] = [];
-        for (const cat of allCats) {
-          if (cat.id === "*") { movieCats.push(cat); continue; }
-          try {
-            const res = await serverManager.getProvider().getMovies({ category: cat.id, page: 1 });
-            const items = Array.isArray(res?.js?.data) ? res.js.data : [];
-            if (items.some((item: any) => item.is_series != 1)) movieCats.push(cat);
-          } catch { /* skip on 429 or error */ }
-        }
-
-        await writeGenres(movieCats, "movie", profileId);
+        await upsertGenres(allCats, "movie", profileId);
         await xtreamCache.delete("vod_cats");
         warmVodCache().catch((e) => console.error("[warm-xtream-vod]", e));
-        return movieCats;
+        return allCats;
       } catch (err) {
         console.error(err);
         return h
@@ -307,9 +298,30 @@ export const stalkerV2: ServerRoute[] = [
         const rawData = Array.isArray(firstResult.data) ? firstResult.data : [];
 
         // At the top level (no movieId), exclude series items so only movies show here
-        const firstPageData = Number(movieId) === 0
+        let firstPageData = Number(movieId) === 0
           ? rawData.filter((item: any) => item.is_series != 1)
           : rawData;
+
+        // Page 1 may be entirely series (newest-first sort) — fall back to warm cache for movies
+        if (Number(movieId) === 0 && firstPageData.length === 0 && rawData.length > 0) {
+          const cachedMovies = await xtreamCache.get<any[]>(`vod_streams_${category}`);
+          if (cachedMovies && cachedMovies.length > 0) {
+            const offset = (startApiPage - 1) * itemsPerApiPage;
+            firstPageData = cachedMovies.slice(offset, offset + itemsPerApiPage);
+            const actualTotalItems = cachedMovies.length;
+            return {
+              success: true,
+              page: Number(page),
+              pageAtaTime: 1,
+              total_items: actualTotalItems,
+              actual_length: itemsPerApiPage,
+              total_loaded: firstPageData.length,
+              data: firstPageData,
+              errors: false,
+              isPortal: initialConfig.providerType === "stalker",
+            };
+          }
+        }
 
         // For episode-level requests the cmd in get_ordered_list is a stale,
         // IP-restricted CDN URL. Call create_link to get a fresh token.
@@ -417,9 +429,29 @@ export const stalkerV2: ServerRoute[] = [
 
         const rawData = Array.isArray(firstResult.data) ? firstResult.data : [];
         // Native portals return only series items; VOD-mixed portals need is_series filter
-        const firstPageData = Number(movieId) === 0
+        let firstPageData = Number(movieId) === 0
           ? (isNativeSeries ? rawData : rawData.filter((item: any) => item.is_series == 1))
           : rawData;
+
+        // VOD-mixed: page 1 may be entirely movies — fall back to warm cache for series
+        if (Number(movieId) === 0 && !isNativeSeries && firstPageData.length === 0 && rawData.length > 0) {
+          const cachedSeries = await xtreamCache.get<any[]>(`series_list_${category}`);
+          if (cachedSeries && cachedSeries.length > 0) {
+            const offset = (startApiPage - 1) * itemsPerApiPage;
+            const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage);
+            return {
+              success: true,
+              page: Number(page),
+              pageAtaTime: 1,
+              total_items: cachedSeries.length,
+              actual_length: itemsPerApiPage,
+              total_loaded: pageData.length,
+              data: pageData,
+              errors: false,
+              isPortal: initialConfig.providerType === "stalker",
+            };
+          }
+        }
 
         const portalTotal = firstResult.total_items ?? 0;
         // For native portals ratio is always 1; for VOD-mixed scale by series density
@@ -554,34 +586,20 @@ export const stalkerV2: ServerRoute[] = [
         );
 
         if (nativeCats.length > 0) {
-          await writeGenres(nativeCats, "series", profileId);
+          await upsertGenres(nativeCats, "series", profileId);
           await XtreamCache.upsert({ key: "portal_series_source", value: JSON.stringify("native"), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
           await xtreamCache.delete("series_cats");
           warmSeriesCache().catch((e) => console.error("[warm-xtream-series]", e));
           return nativeCats;
         }
 
-        // Fall back to VOD-peek (Type 1 portal — series mixed into VOD with is_series flag)
-        const groups = await serverManager.getProvider().getMoviesGroups();
-        const allCats = (Array.isArray(groups.js) ? groups.js : []).filter(
-          (ch: any) => initialConfig.playCensored || ch.censored != 1,
-        );
-
-        const seriesCats: any[] = [];
-        for (const cat of allCats) {
-          if (cat.id === "*") { seriesCats.push(cat); continue; }
-          try {
-            const res = await serverManager.getProvider().getMovies({ category: cat.id, page: 1 });
-            const items = Array.isArray(res?.js?.data) ? res.js.data : [];
-            if (items.some((item: any) => item.is_series == 1)) seriesCats.push(cat);
-          } catch { /* skip on 429 or error */ }
-        }
-
-        await writeGenres(seriesCats, "series", profileId);
+        // Portal A — series are mixed into VOD with is_series flag.
+        // Don't pre-populate series genres here; warmVodCache will scan each
+        // VOD category and call upsertGenre("series") for any that contain series.
         await XtreamCache.upsert({ key: "portal_series_source", value: JSON.stringify("vod"), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
         await xtreamCache.delete("series_cats");
-        warmSeriesCache().catch((e) => console.error("[warm-xtream-series]", e));
-        return seriesCats;
+        warmVodCache().catch((e) => console.error("[warm-xtream-vod]", e));
+        return await readGenres("series", profileId);
       } catch (err) {
         console.error(err);
         return h
@@ -775,6 +793,15 @@ export const stalkerV2: ServerRoute[] = [
       warmSeriesCache().catch((e) => console.error("[warm-xtream-series]", e));
       warmSeriesInfoCache().catch((e) => console.error("[warm-xtream-series-info]", e));
       return { success: true, message: "Series cache warming started in background." };
+    },
+  },
+
+  {
+    method: "POST",
+    path: "/api/v2/cleanup-genres",
+    handler: async (_request, h) => {
+      await cleanupGenres();
+      return { success: true, message: "Genre cleanup complete." };
     },
   },
 

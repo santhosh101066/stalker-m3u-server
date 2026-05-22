@@ -19,7 +19,7 @@ import { socketService } from "./services/SocketService";
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
 import { loadPlaylistCache } from "./utils/getM3uUrls";
-import { warmVodCache, warmSeriesCache, warmSeriesInfoCache } from "./routes/xtream";
+import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres } from "./routes/xtream";
 import { logger } from "./utils/logger";
 
 const init = async () => {
@@ -120,18 +120,19 @@ const init = async () => {
 
   logger.info(`Server running at: ${server.info.uri}`);
 
-  // Warm xtream caches in background on startup
-  warmVodCache().catch((e) => logger.error(`[warmVodCache] ${e}`));
-  warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache] ${e}`));
+  // Warm xtream caches in background on startup, then cleanup stale genres
+  Promise.all([
+    warmVodCache().catch((e) => logger.error(`[warmVodCache] ${e}`)),
+    warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache] ${e}`)),
+  ]).then(() => cleanupGenres().catch((e) => logger.error(`[cleanupGenres] ${e}`)));
   warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache] ${e}`));
 
   // Re-warm all xtream caches every 24 hours
   setInterval(() => {
-    warmVodCache().catch((e) => logger.error(`[warmVodCache interval] ${e}`));
-  }, 24 * 60 * 60 * 1000);
-
-  setInterval(() => {
-    warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache interval] ${e}`));
+    Promise.all([
+      warmVodCache().catch((e) => logger.error(`[warmVodCache interval] ${e}`)),
+      warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache interval] ${e}`)),
+    ]).then(() => cleanupGenres().catch((e) => logger.error(`[cleanupGenres interval] ${e}`)));
   }, 24 * 60 * 60 * 1000);
 
   setInterval(() => {
