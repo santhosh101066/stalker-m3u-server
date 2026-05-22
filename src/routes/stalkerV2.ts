@@ -7,7 +7,7 @@ import {
   writeGenres,
   upsertGenres,
 } from "@/utils/storage";
-import { initialConfig } from "@/config/server";
+import { initialConfig, seriesFlag } from "@/config/server";
 import { serverManager } from "@/serverManager";
 import { Genre, Channel, EPG_List } from "@/types/types";
 import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
@@ -299,7 +299,7 @@ export const stalkerV2: ServerRoute[] = [
 
         // At the top level (no movieId), exclude series items so only movies show here
         let firstPageData = Number(movieId) === 0
-          ? rawData.filter((item: any) => item.is_series != 1)
+          ? rawData.filter((item: any) => item[seriesFlag] != 1)
           : rawData;
 
         // Page 1 may be entirely series (newest-first sort) — fall back to warm cache for movies
@@ -434,7 +434,7 @@ export const stalkerV2: ServerRoute[] = [
         const rawData = Array.isArray(firstResult.data) ? firstResult.data : [];
         // Native portals return only series items; VOD-mixed portals need is_series filter
         let firstPageData = Number(movieId) === 0
-          ? (isNativeSeries ? rawData : rawData.filter((item: any) => item.is_series == 1))
+          ? (isNativeSeries ? rawData : rawData.filter((item: any) => item[seriesFlag] == 1))
           : rawData;
 
         // VOD-mixed: page 1 may be entirely movies — fall back to warm cache for series
@@ -446,7 +446,7 @@ export const stalkerV2: ServerRoute[] = [
             const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage).map((s: any) => ({
               ...s,
               id: String(s.series_id),
-              is_series: 1,
+              [seriesFlag]: 1,
             }));
             return {
               success: true,

@@ -1,5 +1,5 @@
 import { Channel, M3U, M3ULine } from "@/types/types";
-import { initialConfig } from "@/config/server";
+import { initialConfig, seriesFlag } from "@/config/server";
 import { readChannels, readGenres } from "./storage";
 import { serverManager } from "@/serverManager";
 import { SystemConfig } from "@/models/SystemConfig";
@@ -187,7 +187,7 @@ async function buildVodM3u(host: string): Promise<string> {
             : `http://${initialConfig.hostname}:${initialConfig.port}${(item as any).screenshot_uri}`
           : "";
         const cleanName = item.name.replaceAll(",", "").replaceAll(" - ", "-");
-        const isSeries = (item as any).is_series == 1;
+        const isSeries = (item as any)[seriesFlag] == 1;
         const groupTitle = isSeries ? `Series - ${group.title}` : `VOD - ${group.title}`;
 
         m3uLines.push({

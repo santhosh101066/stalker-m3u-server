@@ -3,7 +3,7 @@ import { Channel } from "@/models/Channel";
 import { XtreamCache } from "@/models/XtreamCache";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
-import { initialConfig } from "@/config/server";
+import { initialConfig, seriesFlag } from "@/config/server";
 import { readGenres, readChannels, upsertGenre, deleteGenre } from "@/utils/storage";
 import { cmdPlayerV2 } from "@/utils/cmdPlayer";
 import { stalkerApi } from "@/utils/stalker";
@@ -206,8 +206,8 @@ export async function warmSeriesCache(): Promise<void> {
           },
           isKnown,
         );
-        const newSeries = isNativeSeries ? newRaw : newRaw.filter((i: any) => i.is_series == 1);
-        const newMovies = isNativeSeries ? [] : newRaw.filter((i: any) => i.is_series != 1);
+        const newSeries = isNativeSeries ? newRaw : newRaw.filter((i: any) => i[seriesFlag] == 1);
+        const newMovies = isNativeSeries ? [] : newRaw.filter((i: any) => i[seriesFlag] != 1);
 
         if (newSeries.length === 0 && newMovies.length === 0) {
           if (!isNativeSeries && cachedMovies.length > 0) {
@@ -285,7 +285,7 @@ export async function warmSeriesInfoCache(): Promise<void> {
           const candidates = allItems.filter((s: any) => !s.is_episode && s.id);
           seasons = candidates.filter((s: any) => s.season_number || s.season_name);
         }
-        const seriesItem = allItems.find((i: any) => i.is_series) || allItems[0];
+        const seriesItem = allItems.find((i: any) => i[seriesFlag]) || allItems[0];
 
         logger.info(`[XtreamSeriesInfo] ${cacheKey}: ${allItems.length} items, ${seasons.length} seasons (first keys: ${allItems[0] ? Object.keys(allItems[0]).slice(0, 8).join(",") : "none"})`);
 
@@ -428,7 +428,7 @@ export async function catchupScan(): Promise<void> {
           if (items.length === 0) break;
 
           for (const item of items) {
-            if (item.is_series == 1) {
+            if (item[seriesFlag] == 1) {
               if (existingSeriesIds.has(String(item.id))) { passedExistingSeries = true; continue; }
               (passedExistingSeries ? oldSeries : newSeries).push(item);
             } else {
@@ -508,7 +508,7 @@ export async function catchupScan(): Promise<void> {
             const items: any[] = page === 1 ? page1Items : ((await provider.getMovies({ category: genre.id, page }))?.js?.data || []);
             if (items.length === 0) break;
             for (const item of items) {
-              if (item.is_series == 1) {
+              if (item[seriesFlag] == 1) {
                 if (existingSeriesIds.has(String(item.id))) { passedExistingSeries = true; continue; }
                 (passedExistingSeries ? oldSeries : newSeries).push(item);
               } else {
@@ -675,8 +675,8 @@ export async function warmVodCache(): Promise<void> {
           },
           isKnown,
         );
-        const newMovies = newRaw.filter((i: any) => i.is_series != 1);
-        const newSeries = newRaw.filter((i: any) => i.is_series == 1);
+        const newMovies = newRaw.filter((i: any) => i[seriesFlag] != 1);
+        const newSeries = newRaw.filter((i: any) => i[seriesFlag] == 1);
 
         if (newMovies.length === 0 && newSeries.length === 0) {
           // vod_streams up to date — but check if series were ever discovered for this category
@@ -687,7 +687,7 @@ export async function warmVodCache(): Promise<void> {
               const res = await provider.getMovies({ category: genre.id, page });
               return res?.js?.data || [];
             });
-            const seriesItems = allItems.filter((i: any) => i.is_series == 1);
+            const seriesItems = allItems.filter((i: any) => i[seriesFlag] == 1);
             if (seriesItems.length > 0) {
               await xtreamCache.set(seriesKey, seriesItems.map((s: any, idx: number) => mapSeriesItem(s, idx + 1, genre.id)));
               await upsertGenre(genre, "series");
@@ -893,7 +893,7 @@ export const xtreamRoutes: ServerRoute[] = [
               },
               (item) => existingMovieIds.has(String(item.id)) || existingSeriesIds.has(String(item.id)),
             );
-            const newItems = newRaw.filter((i: any) => i.is_series != 1);
+            const newItems = newRaw.filter((i: any) => i[seriesFlag] != 1);
             if (newItems.length === 0) {
               await xtreamCache.set(cacheKey, cached);
               return h.response(cached);
@@ -912,7 +912,7 @@ export const xtreamRoutes: ServerRoute[] = [
             return res?.js?.data || [];
           });
           if (allRawVod.length === 0) return h.response([]);
-          const items = allRawVod.filter((i: any) => i.is_series != 1);
+          const items = allRawVod.filter((i: any) => i[seriesFlag] != 1);
           const result = items.map((m, idx) => mapVodItem(m, idx + 1, category_id));
           await xtreamCache.set(cacheKey, result);
           return h.response(result);
@@ -1001,7 +1001,7 @@ export const xtreamRoutes: ServerRoute[] = [
               },
               (item) => existingSeriesIds.has(String(item.id)) || existingMovieIds.has(String(item.id)),
             );
-            const newItems = isNativeSeries ? newRaw : newRaw.filter((i: any) => i.is_series == 1);
+            const newItems = isNativeSeries ? newRaw : newRaw.filter((i: any) => i[seriesFlag] == 1);
             if (newItems.length === 0) {
               await xtreamCache.set(cacheKey, cached);
               return h.response(cached);
@@ -1028,7 +1028,7 @@ export const xtreamRoutes: ServerRoute[] = [
               const res = await provider.getMovies({ category: category_id, page });
               return res?.js?.data || [];
             });
-            items = allRaw.filter((i: any) => i.is_series == 1);
+            items = allRaw.filter((i: any) => i[seriesFlag] == 1);
           }
           if (allRaw.length === 0) return h.response([]);
           const result = items.map((s, idx) => mapSeriesItem(s, idx + 1, category_id));
@@ -1083,7 +1083,7 @@ export const xtreamRoutes: ServerRoute[] = [
             const candidates = allItems.filter((s: any) => !s.is_episode && s.id);
             seasons = candidates.filter((s: any) => s.season_number || s.season_name);
           }
-          const seriesItem = allItems.find((i: any) => i.is_series) || allItems[0];
+          const seriesItem = allItems.find((i: any) => i[seriesFlag]) || allItems[0];
 
           const episodesMap: Record<string, any[]> = {};
 
