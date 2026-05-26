@@ -48,7 +48,7 @@ class ServerManager {
       await loadActiveProfileFromDB();
       this.initProvider();
       logger.info("Configuration reloaded without restarting server");
-    } catch (error) {
+    } catch (error: any) {
       logger.error(`Failed to reload config: ${error}`);
       throw error;
     }
@@ -67,7 +67,7 @@ class ServerManager {
       this.initProvider();
       await this.server.start();
       logger.info("Server successfully restarted");
-    } catch (error) {
+    } catch (error: any) {
       logger.error(`Failed to restart server: ${error}`);
       throw error;
     }

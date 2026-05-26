@@ -8,6 +8,7 @@ import { serverManager } from "@/serverManager";
 import { Channel, EPG_List, Genre } from "@/types/types";
 import { initialConfig } from "@/config/server";
 import { ConfigProfile } from "@/models/ConfigProfile";
+import { logger } from "@/utils/logger";
 
 const CACHE_DURATION_MS = 12 * 60 * 60 * 1000;
 
@@ -38,8 +39,8 @@ export async function getEpgCache(): Promise<EpgCache | null> {
       return null;
     }
     return cache;
-  } catch (error) {
-    console.warn("Could not read EPG cache:", error);
+  } catch (error: any) {
+    logger.warn("Could not read EPG cache:", error);
     return null;
   }
 }
@@ -48,7 +49,7 @@ export async function getEpgCache(): Promise<EpgCache | null> {
  * Fetches EPG for all filtered channels and writes to cache for the active profile.
  */
 export async function fetchAndCacheEpg(): Promise<EpgCache> {
-  console.log("Fetching fresh EPG data...");
+  logger.info("Fetching fresh EPG data...");
 
   const activeProfile = await ConfigProfile.findOne({ where: { isActive: true } });
   const profileId = activeProfile?.id;
@@ -70,7 +71,7 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
   const CONCURRENCY_LIMIT = 5; // Reduced slightly to give CPU breathing room
   const epgData: Record<string, EPG_List[]> = {}; // Directly push to final object
 
-  console.log(`Starting EPG fetch for ${filteredChannels.length} channels...`);
+  logger.info(`Starting EPG fetch for ${filteredChannels.length} channels...`);
 
   for (let i = 0; i < filteredChannels.length; i += CONCURRENCY_LIMIT) {
     const chunk = filteredChannels.slice(i, i + CONCURRENCY_LIMIT);
@@ -80,8 +81,8 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
         try {
           const epg = await serverManager.getProvider().getEPG(channel.id);
           return { id: channel.id, epg: epg.js || [] };
-        } catch (error) {
-          console.error(`Error for ${channel.id}:`, error);
+        } catch (error: any) {
+          logger.error(`Error for ${channel.id}:`, error);
           return { id: channel.id, epg: [] };
         }
       })
@@ -103,6 +104,6 @@ export async function fetchAndCacheEpg(): Promise<EpgCache> {
   const cache: EpgCache = { timestamp: new Date(), data: epgData };
   await writeEpgCache(cache, profileId);
 
-  console.log("EPG cache updated.");
+  logger.info("EPG cache updated.");
   return cache;
 }

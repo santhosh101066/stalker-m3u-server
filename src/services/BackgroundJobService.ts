@@ -31,10 +31,8 @@ class BackgroundJobService {
     const memory = process.memoryUsage().heapUsed / 1024 / 1024;
     logger.info(`[BackgroundJobService] Checking jobs... Current RAM: ${Math.round(memory)}MB`);
     try {
-      console.time("EPG_FETCH_TIME");
       await this.checkAndUpdateEpg();
-      console.timeEnd("EPG_FETCH_TIME");
-    } catch (err) {
+    } catch (err: any) {
       logger.error(`[BackgroundJobService] Error running jobs: ${err}`);
     }
   }
@@ -63,7 +61,7 @@ class BackgroundJobService {
           logger.info(
             "[BackgroundJobService] EPG update completed successfully.",
           );
-        } catch (err) {
+        } catch (err: any) {
           logger.error(`[BackgroundJobService] Failed to update EPG: ${err}`);
         } finally {
           this.isUpdatingEpg = false;

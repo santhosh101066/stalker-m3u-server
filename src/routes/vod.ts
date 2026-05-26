@@ -24,7 +24,7 @@ export const vodRoutes: ServerRoute[] = [
             .getProvider()
             .getChannelLink(cmd);
           streamUrl = linkResult?.js?.cmd;
-        } catch (e) {
+        } catch (e: any) {
           logger.error(`Error resolving stream URL: ${e}`);
         }
       }

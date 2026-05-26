@@ -4,6 +4,21 @@ export interface BaseConfig {
   stbType: string;
 }
 
+export interface StalkerConfig {
+  contextPath?: string;
+  mac: string;
+  deviceId1?: string;
+  deviceId2?: string;
+  serialNumber?: string;
+  tokens: string[];
+  playCensored: boolean;
+}
+
+export interface XtreamConfig {
+  username?: string;
+  password?: string;
+}
+
 export interface Config extends BaseConfig {
   hostname: string;
   contextPath?: string;

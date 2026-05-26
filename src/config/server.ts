@@ -1,6 +1,31 @@
 import { AppConfig, Config } from "@/types/types";
 import { ConfigProfile } from "@/models/ConfigProfile";
 import { Token } from "@/models/Token";
+import { logger } from "@/utils/logger";
+
+function separateProviderConfig(config: Record<string, any>): Record<string, any> {
+  const providerType = config.providerType || "stalker";
+  const result: Record<string, any> = {};
+  const sharedKeys = ["hostname", "port", "groups", "proxy", "providerType", "tvgIdPreFill", "tokenCacheDuration", "delayBetweenUrlGeneration", "computeUrlLink", "maxNumberOfChannelsToTest", "vodMaxPagePerGenre", "vodIncludeRating", "vodOrdering", "testM3uFile", "streamTester", "userAgent", "stbType"];
+  const stalkerKeys = ["contextPath", "mac", "deviceId1", "deviceId2", "serialNumber", "tokens", "playCensored"];
+  const xtreamKeys = ["username", "password"];
+
+  for (const key of sharedKeys) {
+    if (key in config) result[key] = config[key];
+  }
+
+  if (providerType === "xtream") {
+    for (const key of xtreamKeys) {
+      if (key in config) result[key] = config[key];
+    }
+  } else {
+    for (const key of stalkerKeys) {
+      if (key in config) result[key] = config[key];
+    }
+  }
+
+  return result;
+}
 
 export const serverConfig = {
   host: "0.0.0.0",
@@ -35,7 +60,7 @@ if (process.env.NODE_ENV === "production" && !proxySecret) {
     "FATAL: PROXY_SECRET environment variable is required in production mode.",
   );
 } else if (!proxySecret) {
-  console.warn("WARNING: PROXY_SECRET not set, using insecure default.");
+  logger.warn("WARNING: PROXY_SECRET not set, using insecure default.");
 }
 
 const AppConfigDefault: AppConfig = {
@@ -68,40 +93,72 @@ export async function migrateToProfiles() {
   try {
     const existingProfiles = await ConfigProfile.count();
     if (existingProfiles === 0) {
-      console.log("No profiles found. Creating default profile...");
+      logger.info("No profiles found. Creating default profile...");
+      const separated = separateProviderConfig(ConfigDefault as any);
       await ConfigProfile.create({
         name: "Default Profile",
         description: "Initialized from defaults",
-        config: ConfigDefault,
+        config: separated as Config,
         isActive: true,
         isEnabled: true,
       });
-      console.log("✅ Migration complete: Created 'Default Profile'");
+      logger.info("✅ Migration complete: Created 'Default Profile'");
     }
-  } catch (err) {
-    console.error("Error during profile migration:", err);
+  } catch (err: any) {
+    logger.error("Error during profile migration:", err);
+  }
+}
+
+async function migrateFlatConfigs() {
+  try {
+    const profiles = await ConfigProfile.findAll();
+    let migrated = 0;
+    for (const profile of profiles) {
+      const cfg = profile.config as Record<string, any>;
+      const hasStalkerFields = "mac" in cfg || "deviceId1" in cfg;
+      const hasXtreamFields = "username" in cfg || "password" in cfg;
+      if (hasStalkerFields && hasXtreamFields) {
+        const separated = separateProviderConfig(cfg as any);
+        profile.config = separated as Config;
+        await profile.save();
+        migrated++;
+      }
+    }
+    if (migrated > 0) {
+      logger.info(`Migrated ${migrated} profile(s) to separated provider configs.`);
+    }
+  } catch (err: any) {
+    logger.error("Error migrating flat configs:", err);
   }
 }
 
 export async function loadActiveProfileFromDB() {
   try {
+    await migrateFlatConfigs();
+
     const activeProfile = await ConfigProfile.findOne({
       where: { isActive: true },
     });
     if (activeProfile) {
+      Object.assign(initialConfig, ConfigDefault);
       Object.assign(initialConfig, activeProfile.config);
 
-      console.log(`✅ Loaded active profile: "${activeProfile.name}"`);
+      initialConfig.hostname = initialConfig.hostname
+        .replace(/^https?:\/\//, "")
+        .replace(/[:\/]+$/, "");
+      initialConfig.port = Number(initialConfig.port) || 80;
+
+      logger.info(`✅ Loaded active profile: "${activeProfile.name}"`);
 
       const tokens = await Token.findAll();
       initialConfig.tokens = tokens.map((t) => t.token);
-      console.log(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
+      logger.info(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
     } else {
-      console.warn("⚠️ No active profile found. Using defaults.");
+      logger.warn("⚠️ No active profile found. Using defaults.");
       Object.assign(initialConfig, ConfigDefault);
     }
-  } catch (err) {
-    console.error("Error loading active profile from DB:", err);
+  } catch (err: any) {
+    logger.error("Error loading active profile from DB:", err);
   }
 }
 
@@ -117,11 +174,11 @@ export async function switchProfile(profileId: number) {
     profile.isActive = true;
     await profile.save();
 
-    console.log(`✅ Switched to profile: "${profile.name}"`);
+    logger.info(`✅ Switched to profile: "${profile.name}"`);
     await loadActiveProfileFromDB();
     return profile;
-  } catch (err) {
-    console.error("Error switching profile:", err);
+  } catch (err: any) {
+    logger.error("Error switching profile:", err);
     throw err;
   }
 }
@@ -133,18 +190,21 @@ export async function saveProfileToDB(profileData: {
   isEnabled?: boolean;
 }) {
   try {
+    const separated = separateProviderConfig(profileData.config as any);
     const profile = await ConfigProfile.create({
       name: profileData.name,
       description: profileData.description,
-      config: profileData.config,
+      config: separated as Config,
       isActive: false,
       isEnabled:
         profileData.isEnabled !== undefined ? profileData.isEnabled : true,
     });
-    console.log(`✅ Created profile: "${profile.name}"`);
+    logger.info(`✅ Created profile: "${profile.name}"`);
     return profile;
-  } catch (err) {
-    console.error("Error saving profile to DB:", err);
+  } catch (err: any) {
+    logger.error("Error saving profile to DB:", err);
     throw err;
   }
 }
+
+export { separateProviderConfig };

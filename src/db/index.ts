@@ -6,6 +6,7 @@ import { ConfigProfile } from "../models/ConfigProfile";
 import { Channel } from "../models/Channel";
 import { Genre } from "../models/Genre";
 import { EpgCache } from "../models/EpgCache";
+import { logger } from "@/utils/logger";
 
 export const sequelize = new Sequelize({
   dialect: "sqlite",
@@ -17,10 +18,10 @@ export const sequelize = new Sequelize({
 export async function initDB() {
   try {
     await sequelize.authenticate();
-    console.log("Database connection has been established successfully.");
+    logger.info("Database connection has been established successfully.");
     await sequelize.sync();
-    console.log("Database models synced.");
-  } catch (error) {
-    console.error("Unable to connect to the database:", error);
+    logger.info("Database models synced.");
+  } catch (error: any) {
+    logger.error("Unable to connect to the database:", error);
   }
 }

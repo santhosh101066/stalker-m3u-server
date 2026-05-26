@@ -2,6 +2,7 @@ import { Channel, Genre, M3U, M3ULine } from "@/types/types";
 import { initialConfig } from "@/config/server";
 import { readChannels, readGenres } from "./storage";
 import { serverManager } from "@/serverManager";
+import { logger } from "@/utils/logger";
 
 function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
   return {
@@ -106,8 +107,8 @@ export async function getEPGV2() {
             xmltv += `  </programme>\n`;
           });
         }
-      } catch (error) {
-        console.error(
+      } catch (error: any) {
+        logger.error(
           `Failed to fetch EPG data for channel ${channel.name}:`,
           error,
         );

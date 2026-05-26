@@ -2,6 +2,7 @@ import { ServerRoute, Request, ResponseToolkit } from "@hapi/hapi";
 import { httpClient } from "@/utils/httpClient";
 import http from "http";
 import https, { RequestOptions } from "https";
+import { logger } from "@/utils/logger";
 
 function assertHttpUrl(raw: string) {
   const u = new URL(raw);
@@ -84,7 +85,7 @@ export const proxy: ServerRoute[] = [
 
         return await handleProxyStream(request, h, decodedUrl, referer);
       } catch (error: any) {
-        console.error("[/proxy/stream] error:", error.message || error);
+        logger.error("[/proxy/stream] error:", error.message || error);
         if (error.response) {
           return h
             .response({ error: "Failed to fetch upstream content" })
@@ -124,13 +125,13 @@ export const proxy: ServerRoute[] = [
             contentType.includes("video/") ||
             contentType.includes("application/octet-stream")
           ) {
-            console.log(
+            logger.info(
               `[SmartProxy] Detected binary content (${contentType}), streaming directly.`,
             );
             return await handleProxyStream(request, h, playlistUrl, referer);
           }
-        } catch (headErr) {
-          console.warn(
+        } catch (headErr: any) {
+          logger.warn(
             "[SmartProxy] HEAD request failed, falling back to GET",
             headErr,
           );
@@ -194,7 +195,7 @@ export const proxy: ServerRoute[] = [
           .type("application/vnd.apple.mpegurl")
           .header("Cache-Control", "no-cache");
       } catch (err: any) {
-        console.error("[/proxy] error:", err?.message || err);
+        logger.error("[/proxy] error:", err?.message || err);
         return h.response({ error: "Failed to proxy playlist" }).code(500);
       }
     },

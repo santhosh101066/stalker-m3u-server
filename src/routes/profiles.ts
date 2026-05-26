@@ -1,10 +1,11 @@
 import { ServerRoute } from "@hapi/hapi";
 import { ConfigProfile } from "@/models/ConfigProfile";
-import { CreateProfileRequest, UpdateProfileRequest } from "@/types/types";
+import { Config, CreateProfileRequest, UpdateProfileRequest } from "@/types/types";
 import {
   switchProfile,
   saveProfileToDB,
   loadActiveProfileFromDB,
+  separateProviderConfig,
 } from "@/config/server";
 import { serverManager } from "@/serverManager";
 import { stalkerApi } from "@/utils/stalker";
@@ -13,21 +14,22 @@ import { Genre } from "@/models/Genre";
 import { EpgCache } from "@/models/EpgCache";
 import crypto from "crypto";
 import { socketService } from "@/services/SocketService";
-import { authCheck } from "@/utils/jwt";
+import { logger } from "@/utils/logger";
+
 
 export const profileRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/api/profiles",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profiles = await ConfigProfile.findAll({
           order: [["createdAt", "DESC"]],
         });
         return profiles;
-      } catch (error) {
-        console.error("Error fetching profiles:", error);
+      } catch (error: any) {
+        logger.error("Error fetching profiles:", error);
         return h.response({ error: "Failed to fetch profiles" }).code(500);
       }
     },
@@ -37,7 +39,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "GET",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -47,8 +49,8 @@ export const profileRoutes: ServerRoute[] = [
         }
 
         return profile;
-      } catch (error) {
-        console.error("Error fetching profile:", error);
+      } catch (error: any) {
+        logger.error("Error fetching profile:", error);
         return h.response({ error: "Failed to fetch profile" }).code(500);
       }
     },
@@ -58,7 +60,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const payload = request.payload as CreateProfileRequest;
         const safeName = payload.name?.trim();
@@ -87,8 +89,8 @@ export const profileRoutes: ServerRoute[] = [
         });
 
         return h.response(profile).code(201);
-      } catch (error) {
-        console.error("Error creating profile:", error);
+      } catch (error: any) {
+        logger.error("Error creating profile:", error);
         return h.response({ error: "Failed to create profile" }).code(500);
       }
     },
@@ -98,7 +100,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "PUT",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
         const payload = request.payload as UpdateProfileRequest;
@@ -125,14 +127,15 @@ export const profileRoutes: ServerRoute[] = [
 
         if (payload.description !== undefined)
           profile.description = payload.description;
-        if (payload.config !== undefined) profile.config = payload.config;
+        if (payload.config !== undefined)
+          profile.config = separateProviderConfig(payload.config as any) as Config;
         if (payload.isEnabled !== undefined)
           profile.isEnabled = payload.isEnabled;
 
         await profile.save();
 
         if (profile.isActive && payload.config) {
-          console.log(
+          logger.info(
             "Active profile updated. Reloading config without restart...",
           );
 
@@ -146,8 +149,8 @@ export const profileRoutes: ServerRoute[] = [
         }
 
         return profile;
-      } catch (error) {
-        console.error("Error updating profile:", error);
+      } catch (error: any) {
+        logger.error("Error updating profile:", error);
         return h.response({ error: "Failed to update profile" }).code(500);
       }
     },
@@ -157,7 +160,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "DELETE",
     path: "/api/profiles/{id}",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -175,19 +178,19 @@ export const profileRoutes: ServerRoute[] = [
             .code(400);
         }
 
-        console.log(`Deleting associated data for profile ${profileId}...`);
+        logger.info(`Deleting associated data for profile ${profileId}...`);
         await Channel.destroy({ where: { profileId } });
         await Genre.destroy({ where: { profileId } });
         await EpgCache.destroy({ where: { profileId } });
 
         await profile.destroy();
 
-        console.log(
+        logger.info(
           `Profile ${profileId} and its associated data deleted successfully.`,
         );
         return { message: "Profile and associated data deleted successfully" };
-      } catch (error) {
-        console.error("Error deleting profile:", error);
+      } catch (error: any) {
+        logger.error("Error deleting profile:", error);
         return h.response({ error: "Failed to delete profile" }).code(500);
       }
     },
@@ -197,13 +200,13 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/activate",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
 
         const profile = await switchProfile(profileId);
 
-        console.log("Switching profile. Reloading config without restart...");
+        logger.info("Switching profile. Reloading config without restart...");
         await serverManager.reloadConfig();
         stalkerApi.clearCache();
 
@@ -216,7 +219,7 @@ export const profileRoutes: ServerRoute[] = [
           hash
         };
       } catch (error: any) {
-        console.error("Error activating profile:", error);
+        logger.error("Error activating profile:", error);
         return h
           .response({ error: error.message || "Failed to activate profile" })
           .code(400);
@@ -228,7 +231,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/enable",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -241,8 +244,8 @@ export const profileRoutes: ServerRoute[] = [
         await profile.save();
 
         return { message: `Profile "${profile.name}" enabled`, profile };
-      } catch (error) {
-        console.error("Error enabling profile:", error);
+      } catch (error: any) {
+        logger.error("Error enabling profile:", error);
         return h.response({ error: "Failed to enable profile" }).code(500);
       }
     },
@@ -252,7 +255,7 @@ export const profileRoutes: ServerRoute[] = [
     method: "POST",
     path: "/api/profiles/{id}/disable",
     handler: async (request, h) => {
-      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+
       try {
         const profileId = parseInt(request.params.id);
         const profile = await ConfigProfile.findByPk(profileId);
@@ -274,8 +277,8 @@ export const profileRoutes: ServerRoute[] = [
         await profile.save();
 
         return { message: `Profile "${profile.name}" disabled`, profile };
-      } catch (error) {
-        console.error("Error disabling profile:", error);
+      } catch (error: any) {
+        logger.error("Error disabling profile:", error);
         return h.response({ error: "Failed to disable profile" }).code(500);
       }
     },

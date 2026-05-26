@@ -24,7 +24,7 @@ export async function cmdPlayerV2(cmd: string): Promise<string | null> {
         logger.warn(
           `[cmdPlayerV2] Attempt ${attempts + 1} failed to resolve URL for ${cmd}. Retrying...`,
         );
-      } catch (err) {
+      } catch (err: any) {
         logger.error(`[cmdPlayerV2] Error on attempt ${attempts + 1}: ${err}`);
       }
       attempts++;

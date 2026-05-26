@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { writeChannels, writeGenres, writeEpgCache } from "./storage";
 import { ConfigProfile } from "../models/ConfigProfile";
+import { logger } from "@/utils/logger";
 
 const MEM_PATH = path.resolve(__dirname, "../../.mem");
 
@@ -23,7 +24,7 @@ function readJsonFiles(): JsonData {
     const channelsPath = path.join(MEM_PATH, "channels.json");
     if (fs.existsSync(channelsPath)) {
       data.channels = JSON.parse(fs.readFileSync(channelsPath, "utf-8"));
-      console.log(`Found ${data.channels!.length} channels`);
+      logger.info(`Found ${data.channels!.length} channels`);
     }
 
     const channelGroupsPath = path.join(MEM_PATH, "channel-groups.json");
@@ -31,13 +32,13 @@ function readJsonFiles(): JsonData {
       data.channelGroups = JSON.parse(
         fs.readFileSync(channelGroupsPath, "utf-8"),
       );
-      console.log(`Found ${data.channelGroups!.length} channel groups`);
+      logger.info(`Found ${data.channelGroups!.length} channel groups`);
     }
 
     const movieGroupsPath = path.join(MEM_PATH, "movie-groups.json");
     if (fs.existsSync(movieGroupsPath)) {
       data.movieGroups = JSON.parse(fs.readFileSync(movieGroupsPath, "utf-8"));
-      console.log(`Found ${data.movieGroups!.length} movie groups`);
+      logger.info(`Found ${data.movieGroups!.length} movie groups`);
     }
 
     const seriesGroupsPath = path.join(MEM_PATH, "series-groups.json");
@@ -45,7 +46,7 @@ function readJsonFiles(): JsonData {
       data.seriesGroups = JSON.parse(
         fs.readFileSync(seriesGroupsPath, "utf-8"),
       );
-      console.log(`Found ${data.seriesGroups!.length} series groups`);
+      logger.info(`Found ${data.seriesGroups!.length} series groups`);
     }
 
     const epgCachePath = path.join(MEM_PATH, "epg-cache.json");
@@ -57,13 +58,13 @@ function readJsonFiles(): JsonData {
           timestamp: new Date(epgData.timestamp),
           data: epgData.data,
         };
-        console.log(
+        logger.info(
           `Found EPG cache with timestamp ${data.epgCache.timestamp}`,
         );
       }
     }
-  } catch (error) {
-    console.error("Error reading JSON files:", error);
+  } catch (error: any) {
+    logger.error("Error reading JSON files:", error);
   }
 
   return data;
@@ -73,10 +74,10 @@ function readJsonFiles(): JsonData {
  * Migrates JSON data to database
  */
 export async function migrateJsonToDatabase(): Promise<void> {
-  console.log("Starting migration from JSON files to database...");
+  logger.info("Starting migration from JSON files to database...");
 
   if (!fs.existsSync(MEM_PATH)) {
-    console.log("No .mem folder found. Skipping migration.");
+    logger.info("No .mem folder found. Skipping migration.");
     return;
   }
 
@@ -92,56 +93,56 @@ export async function migrateJsonToDatabase(): Promise<void> {
     const profileId = targetProfile?.id;
 
     if (!profileId) {
-      console.warn(
+      logger.warn(
         "⚠️ No profile found in database. Data will be saved with profileId = NULL.",
       );
     } else {
-      console.log(`Using Profile ID: ${profileId} (${targetProfile.name})`);
+      logger.info(`Using Profile ID: ${profileId} (${targetProfile.name})`);
     }
 
     if (data.channels && data.channels.length > 0) {
-      console.log("Migrating channels...");
+      logger.info("Migrating channels...");
       await writeChannels(data.channels, profileId);
       migrated++;
-      console.log("✓ Channels migrated successfully");
+      logger.info("✓ Channels migrated successfully");
     }
 
     if (data.channelGroups && data.channelGroups.length > 0) {
-      console.log("Migrating channel groups...");
+      logger.info("Migrating channel groups...");
       await writeGenres(data.channelGroups, "channel", profileId);
       migrated++;
-      console.log("✓ Channel groups migrated successfully");
+      logger.info("✓ Channel groups migrated successfully");
     }
 
     if (data.movieGroups && data.movieGroups.length > 0) {
-      console.log("Migrating movie groups...");
+      logger.info("Migrating movie groups...");
       await writeGenres(data.movieGroups, "movie", profileId);
       migrated++;
-      console.log("✓ Movie groups migrated successfully");
+      logger.info("✓ Movie groups migrated successfully");
     }
 
     if (data.seriesGroups && data.seriesGroups.length > 0) {
-      console.log("Migrating series groups...");
+      logger.info("Migrating series groups...");
       await writeGenres(data.seriesGroups, "series", profileId);
       migrated++;
-      console.log("✓ Series groups migrated successfully");
+      logger.info("✓ Series groups migrated successfully");
     }
 
     if (data.epgCache) {
-      console.log("Migrating EPG cache...");
+      logger.info("Migrating EPG cache...");
       await writeEpgCache(data.epgCache, profileId);
       migrated++;
-      console.log("✓ EPG cache migrated successfully");
+      logger.info("✓ EPG cache migrated successfully");
     }
 
     if (migrated === 0) {
-      console.log("No data found to migrate.");
+      logger.info("No data found to migrate.");
     } else {
-      console.log(`\n✓ Migration completed! ${migrated} data types migrated.`);
-      console.log("\nYou can now safely delete the .mem folder if you wish.");
+      logger.info(`\n✓ Migration completed! ${migrated} data types migrated.`);
+      logger.info("\nYou can now safely delete the .mem folder if you wish.");
     }
-  } catch (error) {
-    console.error("Migration failed:", error);
+  } catch (error: any) {
+    logger.error("Migration failed:", error);
     throw error;
   }
 }
@@ -156,8 +157,8 @@ if (require.main === module) {
       await initDB();
       await migrateJsonToDatabase();
       process.exit(0);
-    } catch (error) {
-      console.error("Migration script failed:", error);
+    } catch (error: any) {
+      logger.error("Migration script failed:", error);
       process.exit(1);
     }
   })();

@@ -13,6 +13,7 @@ import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
 import { ConfigProfile } from "@/models/ConfigProfile";
 import { stalkerApi } from "@/utils/stalker";
 import { Readable } from "stream";
+import { logger } from "@/utils/logger";
 
 const getActiveProfileId = async () => {
   const activeProfile = await ConfigProfile.findOne({
@@ -47,8 +48,8 @@ export const stalkerV2: ServerRoute[] = [
           .response(nodeStream)
           .type(contentType)
           .header("cache-control", "max-age=3600");
-      } catch (err) {
-        console.error("Piping error:", err);
+      } catch (err: any) {
+        logger.error("Piping error:", err);
         return h
           .response({ success: false, error: "An unexpected error occurred." })
           .code(500);
@@ -67,8 +68,8 @@ export const stalkerV2: ServerRoute[] = [
         );
         await writeGenres(filteredCategory, "channel", profileId);
         return filteredCategory;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to refresh groups." })
           .code(500);
@@ -98,8 +99,8 @@ export const stalkerV2: ServerRoute[] = [
             initialConfig.groups.includes(group.title),
         );
         return filteredGroups;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve groups." })
           .code(500);
@@ -127,8 +128,8 @@ export const stalkerV2: ServerRoute[] = [
               initialConfig.groups.includes(genre.title))
           );
         });
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to refresh channels." })
           .code(500);
@@ -156,8 +157,8 @@ export const stalkerV2: ServerRoute[] = [
             );
           })
           .sort((a, b) => a.name.localeCompare(b.name));
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve channels." })
           .code(500);
@@ -176,8 +177,8 @@ export const stalkerV2: ServerRoute[] = [
         );
         await writeGenres(filteredChannels, "movie", profileId);
         return filteredChannels;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -210,8 +211,8 @@ export const stalkerV2: ServerRoute[] = [
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -232,8 +233,8 @@ export const stalkerV2: ServerRoute[] = [
         );
 
         return { success: true, data: filteredChannels };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to reset movies." })
           .code(500);
@@ -279,8 +280,8 @@ export const stalkerV2: ServerRoute[] = [
               sort: sortParam,
             });
             return { page: pageNum, ...res.js };
-          } catch (err) {
-            console.error(`Failed to fetch page ${pageNum}: ${err}`);
+          } catch (err: any) {
+            logger.error(`Failed to fetch page ${pageNum}: ${err}`);
             return {
               page: pageNum,
               data: [],
@@ -323,8 +324,8 @@ export const stalkerV2: ServerRoute[] = [
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve movies." })
           .code(500);
@@ -373,8 +374,8 @@ export const stalkerV2: ServerRoute[] = [
               ...others,
             });
             return { page: pageNum, ...res.js };
-          } catch (err) {
-            console.error(`Failed to fetch page ${pageNum}: ${err}`);
+          } catch (err: any) {
+            logger.error(`Failed to fetch page ${pageNum}: ${err}`);
             return {
               page: pageNum,
               data: [],
@@ -416,8 +417,8 @@ export const stalkerV2: ServerRoute[] = [
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve series." })
           .code(500);
@@ -436,8 +437,8 @@ export const stalkerV2: ServerRoute[] = [
           download,
         });
         return movieLink;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve movie link." })
           .code(500);
@@ -456,8 +457,8 @@ export const stalkerV2: ServerRoute[] = [
         );
         await writeGenres(filteredChannels, "series", profileId);
         return filteredChannels;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -490,8 +491,8 @@ export const stalkerV2: ServerRoute[] = [
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -510,8 +511,8 @@ export const stalkerV2: ServerRoute[] = [
           .getProvider()
           .getChannelLink(request.query.cmd as any);
         return channelLink;
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -532,8 +533,8 @@ export const stalkerV2: ServerRoute[] = [
         }
 
         return [];
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({ success: false, error: "Failed to retrieve EPG." })
           .code(500);
@@ -547,8 +548,8 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const expiry = await serverManager.getProvider().getExpiry();
         return { success: true, expiry };
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        logger.error(err);
         return h
           .response({
             success: false,
@@ -581,8 +582,8 @@ export const stalkerV2: ServerRoute[] = [
         return h
           .response({ success: false, error: "Failed to fetch token" })
           .code(500);
-      } catch (err) {
-        console.error("Error fetching new token:", err);
+      } catch (err: any) {
+        logger.error("Error fetching new token:", err);
         return h
           .response({ success: false, error: "Failed to fetch new token." })
           .code(500);
@@ -606,8 +607,8 @@ export const stalkerV2: ServerRoute[] = [
         }
 
         return { success: true, message: "All tokens cleared." };
-      } catch (err) {
-        console.error("Error clearing tokens:", err);
+      } catch (err: any) {
+        logger.error("Error clearing tokens:", err);
         return h
           .response({ success: false, error: "Failed to clear tokens." })
           .code(500);

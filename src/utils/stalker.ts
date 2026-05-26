@@ -71,7 +71,7 @@ export class StalkerAPI implements IProvider {
         );
         this.cache.set("auth_token", tokenRecord.token, 3600);
       }
-    } catch (err) {
+    } catch (err: any) {
       logger.warn("[StalkerAPI] Could not restore token from DB");
     }
   }
@@ -138,13 +138,12 @@ export class StalkerAPI implements IProvider {
         ),
       );
 
-      if (res.status === 200) {
-      } else {
+      if (res.status !== 200) {
         logger.warn(`[Watchdog] Unexpected status code: ${res.status}`);
       }
 
       this.handleWatchdogEvents(res.data);
-    } catch (err) {
+    } catch (err: any) {
       logger.error(`[Watchdog] Error during check: ${(err as Error).message}`);
     }
   };
@@ -300,7 +299,7 @@ export class StalkerAPI implements IProvider {
               "Authentication failed - Invalid handshake response",
             );
           }
-        } catch (err) {
+        } catch (err: any) {
           logger.error(`getToken inner promise error: ${err}`);
           this.cache.del("auth_token");
           this.isProfileFetching = false;
@@ -311,7 +310,7 @@ export class StalkerAPI implements IProvider {
       })();
 
       return this.profileRefreshPromise;
-    } catch (error) {
+    } catch (error: any) {
       logger.error(`getToken outer error: ${error}`);
       this.profileRefreshPromise = null;
       throw error;
@@ -326,7 +325,7 @@ export class StalkerAPI implements IProvider {
 
       const token = await this.getToken(true);
       return { token };
-    } catch (error) {
+    } catch (error: any) {
       logger.error(`fetchNewToken failed: ${error}`);
       return { token: null, error };
     }
@@ -336,7 +335,7 @@ export class StalkerAPI implements IProvider {
     try {
       await Token.destroy({ where: {} });
       await Token.create({ token, isValid: true });
-    } catch (e) {
+    } catch (e: any) {
       logger.error(`DB Token update failed ${e}`);
     }
   }
@@ -385,7 +384,7 @@ export class StalkerAPI implements IProvider {
         return profile.js.expire_billing_date;
       }
       return null;
-    } catch (e) {
+    } catch (e: any) {
       logger.error(`Failed to get expiry: ${e}`);
       return null;
     }
@@ -458,7 +457,7 @@ export class StalkerAPI implements IProvider {
       } else {
         this.cache.ttl("auth_token", 3600);
       }
-    } catch (error) {
+    } catch (error: any) {
       logger.error(
         `__refreshToken error: ${(error as AxiosError).message || error}`,
       );
@@ -712,7 +711,7 @@ export class StalkerAPI implements IProvider {
       if (!initialConfig.tokens.includes(token)) {
         initialConfig.tokens.push(token);
       }
-    } catch (err) {
+    } catch (err: any) {
       logger.error(`Failed to save token to DB: ${err}`);
     }
   }
@@ -721,7 +720,7 @@ export class StalkerAPI implements IProvider {
     try {
       await Token.destroy({ where: { token } });
       initialConfig.tokens = initialConfig.tokens.filter((t) => t !== token);
-    } catch (err) {
+    } catch (err: any) {
       logger.error(`Failed to remove token from DB: ${err}`);
     }
   }

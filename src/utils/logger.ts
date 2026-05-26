@@ -1,5 +1,4 @@
 import pino from "pino";
-import { appConfig } from "@/config/server";
 
 let broadcastLogFn:
   | ((level: string, message: string, timestamp: string) => void)
@@ -12,7 +11,7 @@ export const setLogBroadcaster = (
 };
 
 const pinoLogger = pino({
-  level: appConfig.app.logLevel || "info",
+  level: process.env.LOG_LEVEL || "info",
   transport: {
     target: "pino-pretty",
     options: {
@@ -42,7 +41,7 @@ const logToSocket = (level: string, args: any[]) => {
       }
     }
     broadcastLogFn(level, message, new Date().toISOString());
-  } catch (err) {}
+  } catch (err: any) {}
 };
 
 export const logger = new Proxy(pinoLogger, {

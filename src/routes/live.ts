@@ -4,6 +4,7 @@ import { ServerRoute } from "@hapi/hapi";
 import { http, https } from "follow-redirects";
 import { RequestOptions } from "https";
 import NodeCache from "node-cache";
+import crypto from "crypto";
 import { appConfig, initialConfig } from "@/config/server";
 import { ReqRefDefaults, ResponseToolkit } from "@hapi/hapi/lib/types";
 import { stalkerApi } from "@/utils/stalker";
@@ -16,7 +17,7 @@ const httpAgent = new http.Agent({ keepAlive: true });
 const httpsAgent = new https.Agent({ keepAlive: true });
 
 function generateSignedUrl(resourceId: string): string {
-  const sig = require("crypto")
+  const sig = crypto
     .createHmac("sha256", SECRET_KEY)
     .update(resourceId)
     .digest("hex");
@@ -24,7 +25,7 @@ function generateSignedUrl(resourceId: string): string {
 }
 
 function verifySignedUrl(resourceId: string, sig: string): boolean {
-  const expectedSig = require("crypto")
+  const expectedSig = crypto
     .createHmac("sha256", SECRET_KEY)
     .update(resourceId)
     .digest("hex");
@@ -107,7 +108,7 @@ async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
     return h
       .response({ error: "Unable to fetch stream [Non Proxy]" })
       .code(400);
-  } catch (err) {
+  } catch (err: any) {
     logger.error(`Non-proxy error: ${err}`);
     return h.response({ error: "Stream fetch failed" }).code(500);
   }
@@ -322,7 +323,7 @@ export const liveRoutes: ServerRoute[] = [
             );
             await populateCache(cmd);
             record = cache.get(cmd);
-          } catch (err) {
+          } catch (err: any) {
             logger.error(`Failed to refresh cache for ${cmd}: ${err}`);
           }
         }
@@ -408,7 +409,7 @@ export const liveRoutes: ServerRoute[] = [
 
             req.end();
           });
-        } catch (err) {
+        } catch (err: any) {
           const message = err instanceof Error ? err.message : String(err);
           logger.error(`[Player] Error fetching segment: ${message}`);
           return h
@@ -416,7 +417,7 @@ export const liveRoutes: ServerRoute[] = [
             .code(502);
         }
       } catch (err: any) {
-        console.error("[Player] Detailed Error:", err);
+        logger.error("[Player] Detailed Error:", err);
         logger.error(`[Player] Error fetching segment: ${err.message || err}`);
 
         return h

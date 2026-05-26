@@ -2,6 +2,7 @@ import { Channel } from "../models/Channel";
 import { Genre, GenreType } from "../models/Genre";
 import { EpgCache } from "../models/EpgCache";
 import { Op } from "sequelize";
+import { logger } from "@/utils/logger";
 
 export async function writeJSON(filename: string, data: any) {
   try {
@@ -18,8 +19,8 @@ export async function writeJSON(filename: string, data: any) {
         await writeEpgCache(data[0]);
       }
     }
-  } catch (error) {
-    console.error(`Error writing to database (${filename}):`, error);
+  } catch (error: any) {
+    logger.error(`Error writing to database (${filename}):`, error);
     throw error;
   }
 }
@@ -57,8 +58,8 @@ export async function writeChannels(
         "profileId",
       ],
     });
-  } catch (error) {
-    console.error("Error writing channels to database:", error);
+  } catch (error: any) {
+    logger.error("Error writing channels to database:", error);
     throw error;
   }
 }
@@ -74,8 +75,8 @@ export async function readChannels(profileId?: number): Promise<any[]> {
       ...c,
       id: prefix ? c.id.replace(new RegExp(`^${prefix}`), "") : c.id
     }));
-  } catch (error) {
-    console.error("Error reading channels from database:", error);
+  } catch (error: any) {
+    logger.error("Error reading channels from database:", error);
     return [];
   }
 }
@@ -112,8 +113,8 @@ export async function writeGenres(
         "profileId",
       ],
     });
-  } catch (error) {
-    console.error(`Error writing ${type} genres to database:`, error);
+  } catch (error: any) {
+    logger.error(`Error writing ${type} genres to database:`, error);
     throw error;
   }
 }
@@ -136,8 +137,8 @@ export async function readGenres(
       ...g,
       id: g.id.replace(new RegExp(`^${prefix}${type}_`), "").replace(new RegExp(`^${type}_`), ""),
     }));
-  } catch (error) {
-    console.error(`Error reading ${type} genres from database:`, error);
+  } catch (error: any) {
+    logger.error(`Error reading ${type} genres from database:`, error);
     return [];
   }
 }
@@ -156,8 +157,8 @@ export async function writeEpgCache(
       data: JSON.stringify(cacheData.data),
       profileId: profileId !== undefined ? profileId : null,
     });
-  } catch (error) {
-    console.error("Error writing EPG cache to database:", error);
+  } catch (error: any) {
+    logger.error("Error writing EPG cache to database:", error);
     throw error;
   }
 }
@@ -175,8 +176,8 @@ export async function readEpgCache(profileId?: number): Promise<any | null> {
       timestamp: cache.timestamp,
       data: JSON.parse(cache.data),
     };
-  } catch (error) {
-    console.error("Error reading EPG cache from database:", error);
+  } catch (error: any) {
+    logger.error("Error reading EPG cache from database:", error);
     return null;
   }
 }

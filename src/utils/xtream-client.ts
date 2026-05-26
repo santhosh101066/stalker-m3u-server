@@ -12,6 +12,7 @@ import {
 import { IProvider } from "@/interfaces/Provider";
 import axios from "axios";
 import { initialConfig } from "@/config/server";
+import { logger } from "@/utils/logger";
 
 export class XtreamClient implements IProvider {
   private baseUrl: string;
@@ -21,7 +22,8 @@ export class XtreamClient implements IProvider {
 
   constructor() {
     const protocol = "http";
-    this.baseUrl = `${protocol}://${initialConfig.hostname}:${initialConfig.port}`;
+    const port = Number(initialConfig.port) || 80;
+    this.baseUrl = `${protocol}://${initialConfig.hostname}:${port}`;
     this.username = initialConfig.username || "";
     this.password = initialConfig.password || "";
   }
@@ -41,8 +43,8 @@ export class XtreamClient implements IProvider {
         },
       });
       return response.data;
-    } catch (error) {
-      console.error("XtreamClient request failed:", error);
+    } catch (error: any) {
+      logger.error("XtreamClient request failed:", error);
       throw error;
     }
   }
@@ -105,7 +107,7 @@ export class XtreamClient implements IProvider {
   }
 
   async getChannelLink(cmd: string): Promise<Data<Program>> {
-    console.log(cmd);
+    logger.info(cmd);
 
     return {
       js: {
