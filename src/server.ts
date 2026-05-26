@@ -26,6 +26,10 @@ const init = async () => {
   await migrateToProfiles();
 
   await loadActiveProfileFromDB();
+  
+  // Explicitly initialize provider after loading the active profile from DB,
+  // since serverManager initialized itself with default config at import time.
+  serverManager.initProvider();
 
   const server = Hapi.server({
     ...serverConfig,

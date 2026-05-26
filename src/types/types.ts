@@ -98,6 +98,7 @@ export interface Video extends Program {
   is_series?: number;
   series_number?: number;
   episode_number?: number;
+  is_season?: number;
 }
 
 export interface Serie extends Program {

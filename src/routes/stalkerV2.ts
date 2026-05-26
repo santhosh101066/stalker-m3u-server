@@ -155,6 +155,14 @@ export const stalkerV2: ServerRoute[] = [
                 initialConfig.groups.includes(genre.title))
             );
           })
+          .map((channel) => ({
+            ...channel,
+            cmd:
+              initialConfig.providerType === "stalker"
+                ? `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`
+                : channel.cmd,
+            isPortal: initialConfig.providerType === "stalker",
+          }))
           .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
         console.error(err);
@@ -373,8 +381,8 @@ export const stalkerV2: ServerRoute[] = [
               ...others,
             });
             return { page: pageNum, ...res.js };
-          } catch (err) {
-            console.error(`Failed to fetch page ${pageNum}: ${err}`);
+          } catch (err: any) {
+            console.error(`Failed to fetch page ${pageNum}:`, err.stack || err);
             return {
               page: pageNum,
               data: [],
