@@ -1,10 +1,28 @@
+import fs from "fs";
 import { AppConfig, Config } from "@/types/types";
 import { ConfigProfile } from "@/models/ConfigProfile";
 import { Token } from "@/models/Token";
 
+function buildTlsConfig() {
+  const cert = process.env.TLS_CERT_PATH;
+  const key = process.env.TLS_KEY_PATH;
+  if (!cert || !key) return undefined;
+  try {
+    return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
+  } catch (e) {
+    console.error(`[TLS] Failed to load cert/key: ${e}`);
+    return undefined;
+  }
+}
+
+const tlsConfig = buildTlsConfig();
+
+export const serverProtocol: "http" | "https" = tlsConfig ? "https" : "http";
+
 export const serverConfig = {
   host: "0.0.0.0",
   port: 3000,
+  ...(tlsConfig ? { tls: tlsConfig } : {}),
   routes: {
     cors: { origin: ["*"] },
     state: {
@@ -17,6 +35,7 @@ export const serverConfig = {
 const ConfigDefault: Config = {
   hostname: process.env.STALKER_HOST || "portal.example.com",
   port: Number(process.env.STALKER_PORT) || 80,
+  https: process.env.STALKER_HTTPS === "true",
   contextPath: process.env.STALKER_PATH || "stalker_portal",
   mac: process.env.STALKER_MAC || "00:1A:79:00:00:00",
   stbType: process.env.STALKER_STB || "MAG254",
@@ -58,6 +77,8 @@ export const appConfig: AppConfig = { ...AppConfigDefault };
 
 // Field name on VOD items that marks them as series (value == 1 means series)
 export const seriesFlag = process.env.SERIES_FLAG || "is_series";
+
+export const tmdbApiToken = process.env.TMDB_API_READ_TOKEN || "";
 
 export function getInitialConfig() {
   return initialConfig;
