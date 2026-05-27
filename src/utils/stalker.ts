@@ -201,9 +201,9 @@ export class StalkerAPI implements IProvider {
       },
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (STB) WebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36",
-        "X-User-Agent": `Model: ${initialConfig.stbType}; Link: WiFi`,
-        Cookie: `mac=${initialConfig.mac}; stb_lang=en; timezone=America/New_York`,
+          "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp rv:2.7.3-r7-250 Safari/533.3",
+        "X-User-Agent": `model=${initialConfig.stbType || "MAG250"};link=wifi;mac=${initialConfig.mac};pkg=2.24.0-r19-250`,
+        Cookie: `mac=${initialConfig.mac}; stb_lang=en; timezone=Europe/London`,
         Authorization: `Bearer ${token}`,
         SN: initialConfig.serialNumber!,
         "Accept-Encoding": "gzip, deflate, br",
@@ -283,6 +283,7 @@ export class StalkerAPI implements IProvider {
           this.cache.del("auth_token");
 
           const response: any = await this.performHandshake();
+          logger.info(`Handshake response: ${JSON.stringify(response)}`);
 
           if (response?.js?.token) {
             const newToken = response.js.token;
@@ -366,6 +367,8 @@ export class StalkerAPI implements IProvider {
           stb_type: initialConfig.stbType,
           sn: initialConfig.serialNumber,
           mac: initialConfig.mac,
+          device_id: initialConfig.deviceId1,
+          device_id2: initialConfig.deviceId2,
           token: token,
           JsHttpRequest: "1-xml",
         },
@@ -449,6 +452,11 @@ export class StalkerAPI implements IProvider {
         throw new Error(
           "Profile refresh failed, invalid response. Likely auth failure.",
         );
+      }
+
+      if (profile.js.blocked === 1 || profile.js.blocked === "1") {
+        logger.error(`[StalkerAPI] Account is BLOCKED: ${profile.js.blocked}`);
+        throw new Error("Subscription blocked by portal");
       }
 
       logger.info(`Expires on : ${profile.js.expire_billing_date}`);
@@ -557,15 +565,20 @@ export class StalkerAPI implements IProvider {
     });
   }
 
-  async getChannelLink(cmd: string) {
+  async getChannelLink(cmd: string, startTime?: number, endTime?: number) {
+    const params: any = {
+      type: "itv",
+      action: "create_link",
+      cmd,
+      disable_ad: "0",
+    };
+    if (startTime && endTime) {
+      params.start_time = startTime;
+      params.end_time = endTime;
+    }
     return this.makeRequest<Data<Program>>(
       this.getPhpUrl(),
-      {
-        type: "itv",
-        action: "create_link",
-        cmd,
-        disable_ad: "0",
-      },
+      params,
       true,
     );
   }
@@ -623,7 +636,7 @@ export class StalkerAPI implements IProvider {
     ...others
   }: MoviesApiParams) {
     const params: any = {
-      type: "series",
+      type: "vod",
       action: "get_ordered_list",
       category,
       genre: "*",
@@ -651,11 +664,14 @@ export class StalkerAPI implements IProvider {
     series,
     id,
     download = 0,
+    cmd,
   }: {
     series: string;
     id: number;
     download: number;
+    cmd?: string;
   }) {
+    const resolvedCmd = cmd || `/media/file_${id}.mpg`;
     const params = {
       type: "vod",
       action: "create_link",
@@ -664,41 +680,52 @@ export class StalkerAPI implements IProvider {
       download: 0,
       forced_storage: "",
       series: Number(series),
-      cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
+      cmd: resolvedCmd,
     };
 
-    return this.makeRequest<Data<Programs<Video>>>("/server/load.php", params);
+    return this.makeRequest<Data<Programs<Video>>>(this.getPhpUrl(), params);
   }
 
   async getSeriesLink({
     series,
     id,
     download = 0,
+    cmd,
   }: {
     series: string;
     id: number;
     download: number;
+    cmd?: string;
   }) {
+    const resolvedCmd = cmd || (initialConfig.contextPath === "" ? String(id) : `/media/${id}.mpg`);
     return this.makeRequest<Data<Programs<Video>>>(this.getPhpUrl(), {
-      type: "series",
+      type: "vod",
       action: "create_link",
       force_ch_link_check: "0",
       disable_ad: "0",
       download,
       forced_stop_range: "",
       series: series,
-      cmd: initialConfig.contextPath === "" ? id : `/media/file_${id}.mpg`,
+      cmd: resolvedCmd,
     });
   }
 
   async getSeriesGroups() {
     return this.makeRequest<Data<Genre[]>>(this.getPhpUrl(), {
-      type: "series",
+      type: "vod",
       action: "get_categories",
     });
   }
 
-  async getEPG(channelId: string) {
+  async getEPG(channelId: string, date?: string) {
+    if (date) {
+      return this.makeRequest<any>(this.getPhpUrl(), {
+        type: "itv",
+        action: "get_epg",
+        ch_id: channelId,
+        date: date,
+      });
+    }
     return this.makeRequest<ArrayData<EPG_List>>(this.getPhpUrl(), {
       type: "epg",
       action: "get_all_program_for_ch",

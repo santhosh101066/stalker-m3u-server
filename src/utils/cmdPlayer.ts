@@ -4,10 +4,11 @@ import { logger } from "./logger";
 
 const pendingCmds = new Map<string, Promise<string | null>>();
 
-export async function cmdPlayerV2(cmd: string): Promise<string | null> {
-  if (pendingCmds.has(cmd)) {
-    logger.info(`[cmdPlayerV2] Deduping request for ${cmd}...`);
-    return pendingCmds.get(cmd)!;
+export async function cmdPlayerV2(cmd: string, startTime?: number, endTime?: number): Promise<string | null> {
+  const cacheKey = startTime && endTime ? `${cmd}_${startTime}_${endTime}` : cmd;
+  if (pendingCmds.has(cacheKey)) {
+    logger.info(`[cmdPlayerV2] Deduping request for ${cacheKey}...`);
+    return pendingCmds.get(cacheKey)!;
   }
 
   const promise = (async () => {
@@ -17,7 +18,7 @@ export async function cmdPlayerV2(cmd: string): Promise<string | null> {
 
     while (attempts < maxAttempts) {
       try {
-        const response = await stalkerApi.getChannelLink(cmd);
+        const response = await stalkerApi.getChannelLink(cmd, startTime, endTime);
         if (response && response.js && response.js.cmd) {
           return response.js.cmd;
         }
@@ -39,11 +40,11 @@ export async function cmdPlayerV2(cmd: string): Promise<string | null> {
     return null;
   })();
 
-  pendingCmds.set(cmd, promise);
+  pendingCmds.set(cacheKey, promise);
 
   try {
     return await promise;
   } finally {
-    pendingCmds.delete(cmd);
+    pendingCmds.delete(cacheKey);
   }
 }

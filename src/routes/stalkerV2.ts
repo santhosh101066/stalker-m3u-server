@@ -119,8 +119,12 @@ export const stalkerV2: ServerRoute[] = [
         );
         await writeChannels(filteredChannels, profileId);
         const genres = await readGenres("channel", profileId);
+        // If no genres are loaded yet, skip genre filtering to avoid returning empty
+        if (genres.length === 0) {
+          return filteredChannels ?? [];
+        }
         return (filteredChannels ?? []).filter((channel) => {
-          const genre = genres.find((r) => r.id === channel.tv_genre_id);
+          const genre = genres.find((r) => r.id === String(channel.tv_genre_id));
           return (
             genre &&
             (initialConfig.groups.length === 0 ||
@@ -146,7 +150,19 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = await readGenres("channel", profileId);
-        return (channels ?? [])
+        const mapped = (channels ?? []).map((channel) => ({
+          ...channel,
+          cmd:
+            initialConfig.providerType === "stalker"
+              ? `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`
+              : channel.cmd,
+          isPortal: initialConfig.providerType === "stalker",
+        }));
+        // If no genres loaded yet, skip genre filtering
+        if (genres.length === 0) {
+          return mapped.sort((a, b) => a.name.localeCompare(b.name));
+        }
+        return mapped
           .filter((channel) => {
             const genre = genres.find((r) => r.id === channel.tv_genre_id);
             return (
@@ -155,14 +171,6 @@ export const stalkerV2: ServerRoute[] = [
                 initialConfig.groups.includes(genre.title))
             );
           })
-          .map((channel) => ({
-            ...channel,
-            cmd:
-              initialConfig.providerType === "stalker"
-                ? `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`
-                : channel.cmd,
-            isPortal: initialConfig.providerType === "stalker",
-          }))
           .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
         console.error(err);
@@ -380,6 +388,17 @@ export const stalkerV2: ServerRoute[] = [
               sort: sortParam,
               ...others,
             });
+
+            if (res && res.js && Array.isArray(res.js.data)) {
+              res.js.data = res.js.data.map((item: any) => {
+                const isEpisode = !!seasonId || !!item.series_number || item.is_episode;
+                return {
+                  ...item,
+                  is_episode: isEpisode ? 1 : item.is_episode,
+                };
+              });
+            }
+
             return { page: pageNum, ...res.js };
           } catch (err: any) {
             console.error(`Failed to fetch page ${pageNum}:`, err.stack || err);
@@ -437,11 +456,12 @@ export const stalkerV2: ServerRoute[] = [
     path: "/api/v2/movie-link",
     handler: async (request, h) => {
       try {
-        const { series = "", id = "", download = 0, token } = request.query;
+        const { series = "", id = "", download = 0, token, cmd } = request.query;
         const movieLink = await serverManager.getProvider().getMovieLink({
-          series,
-          id,
-          download,
+          series: series as string,
+          id: Number(id),
+          download: Number(download),
+          cmd: cmd as string,
         });
         return movieLink;
       } catch (err) {

@@ -268,15 +268,31 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
-      const { cmd, play, id } = request.query as {
+      const { cmd, play, id, start_time, end_time } = request.query as {
         cmd?: string;
         play?: string;
         id?: string;
+        start_time?: string;
+        end_time?: string;
       };
       if (!cmd) return h.response({ error: "Missing cmd parameter" }).code(400);
       if (id) {
         stalkerApi.setActiveChannel(id);
       }
+
+      if (start_time && end_time) {
+        try {
+          const redirectedUrl = await cmdPlayerV2(cmd, Number(start_time), Number(end_time));
+          if (redirectedUrl) {
+            return h.redirect(redirectedUrl).code(302);
+          }
+          return h.response({ error: "Unable to fetch catchup stream" }).code(400);
+        } catch (err) {
+          logger.error(`Catchup stream error: ${err}`);
+          return h.response({ error: "Catchup stream fetch failed" }).code(500);
+        }
+      }
+
       if (initialConfig.proxy) return handleProxy(cmd, play, h);
       return handleNonProxy(cmd, h);
     },
