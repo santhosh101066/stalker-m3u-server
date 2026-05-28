@@ -12,12 +12,70 @@ import {
 import { IProvider } from "@/interfaces/Provider";
 import axios from "axios";
 import { initialConfig } from "@/config/server";
+import NodeCache from "node-cache";
+
+function parseDurationToMinutes(durationStr: string | undefined): number {
+  if (!durationStr) return 0;
+  const parts = durationStr.split(":");
+  if (parts.length === 3) {
+    const hours = parseInt(parts[0], 10) || 0;
+    const minutes = parseInt(parts[1], 10) || 0;
+    const seconds = parseInt(parts[2], 10) || 0;
+    return hours * 60 + minutes + Math.round(seconds / 60);
+  }
+  return parseInt(durationStr, 10) || 0;
+}
+
+function parseDateTimeToTimestamp(dateTimeStr: string): string {
+  if (!dateTimeStr) return "";
+  const match = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+  if (match) {
+    const [_, year, month, day, hour, minute, second] = match;
+    const date = new Date(Date.UTC(
+      parseInt(year, 10),
+      parseInt(month, 10) - 1,
+      parseInt(day, 10),
+      parseInt(hour, 10),
+      parseInt(minute, 10),
+      parseInt(second, 10)
+    ));
+    return Math.floor(date.getTime() / 1000).toString();
+  }
+  return Math.floor(new Date(dateTimeStr).getTime() / 1000).toString();
+}
+
+function isBase64(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const base64Regex = /^[A-Za-z0-9+/]+={0,2}$/;
+  if (!base64Regex.test(str)) return false;
+  if (str.length % 4 !== 0) return false;
+  return true;
+}
+
+function decodeBase64Safe(str: string): string {
+  if (!str) return "";
+  try {
+    if (isBase64(str)) {
+      const decoded = Buffer.from(str, "base64").toString("utf-8");
+      const isReadable = /^[\x20-\x7E\s\u00A0-\uFFFD]+$/.test(decoded);
+      if (isReadable) {
+        return decoded;
+      }
+    }
+  } catch (e) {
+    // Ignore error
+  }
+  return str;
+}
 
 export class XtreamClient implements IProvider {
   private baseUrl: string;
   private username: string;
   private password: string;
   private lastRequestTime: number = 0;
+  private cache = new NodeCache({ stdTTL: 21600, checkperiod: 60 });
+  // Deduplicates concurrent requests for the same upstream key
+  private inFlight = new Map<string, Promise<any>>();
 
   constructor() {
     const protocol = "http";
@@ -30,21 +88,49 @@ export class XtreamClient implements IProvider {
     return `${this.baseUrl}/player_api.php`;
   }
 
+  private getCacheKey(params: Record<string, any>): string {
+    return Object.keys(params)
+      .sort()
+      .map((key) => `${key}:${params[key]}`)
+      .join("|");
+  }
+
   private async makeRequest(params: Record<string, any>) {
     this.lastRequestTime = Date.now();
-    try {
-      const response = await axios.get(this.getApiUrl(), {
+    const cacheKey = this.getCacheKey(params);
+    const cachedData = this.cache.get(cacheKey);
+    if (cachedData !== undefined) {
+      return cachedData;
+    }
+
+    // Deduplicate: if an identical request is already in-flight, wait for it
+    if (this.inFlight.has(cacheKey)) {
+      return this.inFlight.get(cacheKey)!;
+    }
+
+    const request = axios
+      .get(this.getApiUrl(), {
         params: {
           username: this.username,
           password: this.password,
           ...params,
         },
+        timeout: 30000, // 30 s — prevents server hang on slow/dead upstream
+      })
+      .then((response) => {
+        this.cache.set(cacheKey, response.data);
+        return response.data;
+      })
+      .catch((error) => {
+        console.error("XtreamClient request failed:", error?.message ?? error);
+        throw error;
+      })
+      .finally(() => {
+        this.inFlight.delete(cacheKey);
       });
-      return response.data;
-    } catch (error) {
-      console.error("XtreamClient request failed:", error);
-      throw error;
-    }
+
+    this.inFlight.set(cacheKey, request);
+    return request;
   }
 
   async getToken(refreshToken: boolean): Promise<string | null> {
@@ -67,7 +153,9 @@ export class XtreamClient implements IProvider {
     return null;
   }
 
-  clearCache(): void {}
+  clearCache(): void {
+    this.cache.flushAll();
+  }
 
   async getChannelGroups(): Promise<Data<Genre[]>> {
     const data = await this.makeRequest({ action: "get_live_categories" });
@@ -127,7 +215,36 @@ export class XtreamClient implements IProvider {
   }
 
   async getEPG(channelId: string): Promise<ArrayData<EPG_List>> {
-    return { js: [] };
+    try {
+      const data = await this.makeRequest({
+        action: "get_short_epg",
+        stream_id: channelId,
+      });
+
+      let listings: any[] = [];
+      if (Array.isArray(data)) {
+        listings = data;
+      } else if (data && Array.isArray(data.epg_listings)) {
+        listings = data.epg_listings;
+      }
+
+      const epgList: EPG_List[] = listings.map((item: any) => {
+        const title = decodeBase64Safe(item.title || "");
+        const startTimestamp = item.start_timestamp || (item.start ? parseDateTimeToTimestamp(item.start) : "");
+        const stopTimestamp = item.stop_timestamp || (item.end ? parseDateTimeToTimestamp(item.end) : "");
+
+        return {
+          start_timestamp: startTimestamp,
+          stop_timestamp: stopTimestamp,
+          name: title,
+        };
+      });
+
+      return { js: epgList };
+    } catch (error) {
+      console.error(`XtreamClient.getEPG failed for channel ${channelId}:`, error);
+      return { js: [] };
+    }
   }
 
   async getMoviesGroups(): Promise<Data<Genre[]>> {
@@ -149,6 +266,53 @@ export class XtreamClient implements IProvider {
   }
 
   async getMovies(params: MoviesApiParams): Promise<Data<Programs<Video>>> {
+    if (params.movieId && Number(params.movieId) !== 0) {
+      try {
+        const data = await this.makeRequest({
+          action: "get_vod_info",
+          vod_id: params.movieId,
+        });
+
+        if (data && data.info) {
+          const info = data.info;
+          const movieData = data.movie_data || {};
+          const extension = info.container_extension || movieData.container_extension || "mp4";
+
+          const video: any = {
+            id: params.movieId,
+            name: info.name || movieData.name || "",
+            cmd: `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${params.movieId}.${extension}`,
+            screenshot_uri: info.cover_big || info.movie_image || "",
+            category_id: info.category_id || "",
+            time: info.added ? parseInt(info.added) : 0,
+            rating_imdb: info.rating || "0",
+            runtime: info.duration_secs
+              ? Math.floor(parseInt(info.duration_secs) / 60)
+              : info.duration
+                ? parseDurationToMinutes(info.duration)
+                : 0,
+            description: info.description || info.plot || "",
+            director: info.director || "",
+            actors: info.actors || info.cast || "",
+            year: info.releasedate ? info.releasedate.split("-")[0] : "",
+            country: info.country || "",
+            genres_str: info.genre || "",
+          };
+
+          return {
+            js: {
+              total_items: 1,
+              max_page_items: 1,
+              data: [video],
+            },
+          };
+        }
+      } catch (err) {
+        console.error("Error fetching get_vod_info for movieId:", params.movieId, err);
+      }
+      return { js: { total_items: 0, max_page_items: 1, data: [] } };
+    }
+
     const reqParams: any = { action: "get_vod_streams" };
     if (params.category && params.category !== "*" && params.category !== "0") {
       reqParams.category_id = params.category;
@@ -191,11 +355,16 @@ export class XtreamClient implements IProvider {
       }
     }
 
+    const page = params.page ? Number(params.page) : 1;
+    const limit = 14; // Items per page
+    const startIndex = (page - 1) * limit;
+    const paginatedVideos = filteredVideos.slice(startIndex, startIndex + limit);
+
     return {
       js: {
         total_items: filteredVideos.length,
-        max_page_items: filteredVideos.length,
-        data: filteredVideos,
+        max_page_items: limit,
+        data: paginatedVideos,
       },
     };
   }
@@ -205,7 +374,23 @@ export class XtreamClient implements IProvider {
     id: number;
     download: number;
   }): Promise<any> {
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${params.id}.mp4`;
+    let extension = "mp4";
+    try {
+      const data = await this.makeRequest({
+        action: "get_vod_info",
+        vod_id: params.id,
+      });
+      if (data) {
+        if (data.movie_data && data.movie_data.container_extension) {
+          extension = data.movie_data.container_extension;
+        } else if (data.info && data.info.container_extension) {
+          extension = data.info.container_extension;
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching movie container extension:", e);
+    }
+    const url = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${params.id}.${extension}`;
 
     return {
       js: {
@@ -248,9 +433,12 @@ export class XtreamClient implements IProvider {
         
         if (Array.isArray(seasonEpisodes)) {
           seasonEpisodes.forEach((ep: any) => {
-            const duration = ep.info?.duration_secs 
-              ? Math.floor(parseInt(ep.info.duration_secs) / 60) 
-              : 0;
+            let duration = 0;
+            if (ep.info?.duration_secs) {
+              duration = Math.floor(parseInt(ep.info.duration_secs) / 60);
+            } else if (ep.info?.duration) {
+              duration = parseDurationToMinutes(ep.info.duration);
+            }
 
             episodes.push({
               id: ep.id,
@@ -264,6 +452,13 @@ export class XtreamClient implements IProvider {
               is_episode: 1, // Flagging as episode
               series_number: parseInt(seasonNumStr),
               episode_number: parseInt(ep.episode_num),
+              // Enriched Metadata
+              description: ep.info?.plot || data.info?.plot || "",
+              director: ep.info?.director || data.info?.director || "",
+              actors: ep.info?.cast || data.info?.cast || "",
+              genres_str: data.info?.genre || "",
+              year: ep.info?.releaseDate ? ep.info.releaseDate.split("-")[0] : (data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : ""),
+              country: data.info?.country || "",
             });
           });
         }
@@ -301,9 +496,12 @@ export class XtreamClient implements IProvider {
           // Map the episodes for this specific season
           if (Array.isArray(seasonEpisodesRaw)) {
             seasonEpisodesRaw.forEach((ep: any) => {
-              const duration = ep.info?.duration_secs
-                ? Math.floor(parseInt(ep.info.duration_secs) / 60)
-                : 0;
+              let duration = 0;
+              if (ep.info?.duration_secs) {
+                duration = Math.floor(parseInt(ep.info.duration_secs) / 60);
+              } else if (ep.info?.duration) {
+                duration = parseDurationToMinutes(ep.info.duration);
+              }
 
               episodesForSeason.push({
                 id: ep.id,
@@ -332,6 +530,13 @@ export class XtreamClient implements IProvider {
             rating_imdb: data.info?.rating,
             series: [], // <-- THIS IS THE FIX! Nesting episodes here
             is_season: 1,
+            // Enriched Metadata
+            description: data.info?.plot || "",
+            director: data.info?.director || "",
+            actors: data.info?.cast || "",
+            genres_str: data.info?.genre || "",
+            year: data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : "",
+            country: data.info?.country || "",
           });
         });
       }
@@ -372,6 +577,13 @@ export class XtreamClient implements IProvider {
       rating_imdb: item.rating,
       series: [],
       is_series: 1,
+      // Enriched Metadata
+      description: item.plot || "",
+      director: item.director || "",
+      actors: item.cast || "",
+      genres_str: item.genre || "",
+      year: item.releaseDate ? item.releaseDate.split("-")[0] : "",
+      country: item.country || "",
     }));
 
     let filteredSeries = params.search
@@ -390,11 +602,16 @@ export class XtreamClient implements IProvider {
       }
     }
 
+    const page = params.page ? Number(params.page) : 1;
+    const limit = 14; // Items per page
+    const startIndex = (page - 1) * limit;
+    const paginatedSeries = filteredSeries.slice(startIndex, startIndex + limit);
+
     return {
       js: {
         total_items: filteredSeries.length,
-        max_page_items: filteredSeries.length,
-        data: filteredSeries,
+        max_page_items: limit,
+        data: paginatedSeries,
       },
     };
   }
@@ -404,7 +621,28 @@ export class XtreamClient implements IProvider {
     id: number;
     download: number;
   }): Promise<any> {
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${params.id}.mp4`;
+    let extension = "mp4";
+    try {
+      const data = await this.makeRequest({
+        action: "get_series_info",
+        series_id: params.series,
+      });
+      if (data && data.episodes) {
+        for (const seasonNum of Object.keys(data.episodes)) {
+          const episodes = data.episodes[seasonNum];
+          if (Array.isArray(episodes)) {
+            const ep = episodes.find((e: any) => Number(e.id) === Number(params.id));
+            if (ep && ep.container_extension) {
+              extension = ep.container_extension;
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching episode container extension:", e);
+    }
+    const url = `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${params.id}.${extension}`;
     return {
       js: {
         cmd: url,

@@ -1,5 +1,5 @@
 import { httpClient } from "@/utils/httpClient";
-import { appConfig } from "@/config/server";
+import { appConfig, initialConfig } from "@/config/server";
 import { serverManager } from "@/serverManager";
 import NodeCache from "node-cache";
 import { AxiosResponse } from "axios";
@@ -65,7 +65,11 @@ export class LiveStreamService {
       throw new Error("Stream Not Found");
     }
 
-    const res = await httpClient.get(masterUrl);
+    const headers = initialConfig.providerType === "xtream"
+      ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+      : {};
+
+    const res = await httpClient.get(masterUrl, { headers });
 
     if (res.status >= 400) {
       throw new Error(`Upstream Error ${res.status}`);
@@ -117,7 +121,10 @@ export class LiveStreamService {
       }
 
       const fetchPlaylist = async (url: string, isSubpath: boolean = false) => {
-        const res = await httpClient.get(url);
+        const headers = initialConfig.providerType === "xtream"
+          ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+          : {};
+        const res = await httpClient.get(url, { headers });
 
         if (!isSubpath && [301, 302, 403].includes(res.status)) {
           const newMasterUrl = await serverManager
@@ -126,7 +133,7 @@ export class LiveStreamService {
             .then((res) => res.js.cmd);
 
           if (newMasterUrl) {
-            const refreshedRes = await httpClient.get(newMasterUrl);
+            const refreshedRes = await httpClient.get(newMasterUrl, { headers });
 
             const finalUrl =
               refreshedRes.request?.res?.responseUrl || newMasterUrl;
@@ -173,7 +180,10 @@ export class LiveStreamService {
             .then((res) => res.js.cmd);
           if (!newMasterUrl) return { error: "Stream Not Found", code: 404 };
 
-          const refreshedRes = await httpClient.get(newMasterUrl);
+          const headers = initialConfig.providerType === "xtream"
+            ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+            : {};
+          const refreshedRes = await httpClient.get(newMasterUrl, { headers });
 
           const finalUrl =
             refreshedRes.request?.res?.responseUrl || newMasterUrl;
@@ -348,7 +358,8 @@ export class LiveStreamService {
         ...headers,
         host: undefined,
       },
-    });
+      skipRetry: true,
+    } as any);
   }
 }
 

@@ -21,9 +21,10 @@ class ServerManager {
   }
 
   initProvider() {
+    stalkerApi.stopWatchdog();
+    stalkerApi.clearCache();
+
     if (initialConfig.providerType === "xtream") {
-      stalkerApi.stopWatchdog();
-      stalkerApi.clearCache();
       this.provider = new XtreamClient();
       logger.info("Initialized Xtream Codes Provider");
     } else {

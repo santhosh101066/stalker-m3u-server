@@ -57,6 +57,30 @@ export class StalkerAPI implements IProvider {
   private watchdogStarted: boolean = false;
   private activeChannelId: string = "0";
   private lastRequestTime: number = 0;
+  private inFlight = new Map<string, Promise<any>>();
+
+  private getCacheKey(endpoint: string, params: Record<string, any>): string {
+    const keyParts = [endpoint];
+    Object.keys(params)
+      .sort()
+      .forEach((key) => {
+        if (key !== "token" && key !== "timestamp" && key !== "api_signature") {
+          keyParts.push(`${key}:${typeof params[key] === "object" ? JSON.stringify(params[key]) : params[key]}`);
+        }
+      });
+    return keyParts.join("|");
+  }
+
+  private isCacheable(params: Record<string, any>): boolean {
+    const cacheableActions = [
+      "get_ordered_list",
+      "get_genres",
+      "get_all_channels",
+      "get_short_epg",
+      "get_profile"
+    ];
+    return cacheableActions.includes(params.action);
+  }
 
   constructor() {
     this.loadTokenFromDB();
@@ -343,7 +367,7 @@ export class StalkerAPI implements IProvider {
   }
 
   clearCache() {
-    this.cache.del("auth_token");
+    this.cache.flushAll();
     this.random = "";
   }
 
@@ -482,73 +506,101 @@ export class StalkerAPI implements IProvider {
   ): Promise<T> {
     this.lastRequestTime = Date.now();
 
-    return requestLimit(async () => {
-      if (this.profileRefreshPromise) {
-        logger.info(
-          `[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`,
-        );
-        await this.profileRefreshPromise;
+    const cacheable = this.isCacheable(params);
+    const cacheKey = this.getCacheKey(endpoint, params);
+
+    if (cacheable) {
+      const cached = this.cache.get<T>(cacheKey);
+      if (cached !== undefined) {
+        return cached;
       }
-      let token = this.cache.get<string>("auth_token");
-      if (!token) {
-        token = (await this.getToken(false)) || "";
+      if (this.inFlight.has(cacheKey)) {
+        return this.inFlight.get(cacheKey)!;
       }
+    }
 
-      const url = `${this.getBaseUrl()}${endpoint}`;
+    const runRequest = async (): Promise<T> => {
+      return requestLimit(async () => {
+        if (this.profileRefreshPromise) {
+          logger.info(
+            `[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`,
+          );
+          await this.profileRefreshPromise;
+        }
+        let token = this.cache.get<string>("auth_token");
+        if (!token) {
+          token = (await this.getToken(false)) || "";
+        }
 
-      try {
-        const response = await httpRequest(
-          url,
-          { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
-          (() => {
-            const config = this._getAxiosRequestConfig({}, token!, {
-              referrer: this.getBaseUrl(),
-            });
-            return {
-              method: config.method,
-              headers: config.headers as Record<string, string>,
-              timeout: config.timeout,
-            };
-          })(),
-        );
+        const url = `${this.getBaseUrl()}${endpoint}`;
 
-        if (
-          (typeof response === "string" &&
-            response.startsWith("Authorization failed.")) ||
-          response === "Authorization failed."
-        ) {
-          if (!loop) {
-            logger.info(
-              `Auth failed for ${endpoint}. Handling token refresh...`,
-            );
+        try {
+          const response = await httpRequest(
+            url,
+            { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
+            (() => {
+              const config = this._getAxiosRequestConfig({}, token!, {
+                referrer: this.getBaseUrl(),
+              });
+              return {
+                method: config.method,
+                headers: config.headers as Record<string, string>,
+                timeout: config.timeout,
+              };
+            })(),
+          );
 
-            if (!this.profileRefreshPromise) {
-              this.cache.del("auth_token");
-
-              this.getToken(true).catch((err) =>
-                logger.error(`Token refresh failed: ${err}`),
+          if (
+            (typeof response === "string" &&
+              response.startsWith("Authorization failed.")) ||
+            response === "Authorization failed."
+          ) {
+            if (!loop) {
+              logger.info(
+                `Auth failed for ${endpoint}. Handling token refresh...`,
               );
+
+              if (!this.profileRefreshPromise) {
+                this.cache.del("auth_token");
+
+                this.getToken(true).catch((err) =>
+                  logger.error(`Token refresh failed: ${err}`),
+                );
+              }
+
+              await this.profileRefreshPromise;
+              return this.makeRequest(endpoint, params, isFetch, true);
             }
-
-            await this.profileRefreshPromise;
-            return this.makeRequest(endpoint, params, isFetch, true);
+            throw new Error("Authorization Failed.");
           }
-          throw new Error("Authorization Failed.");
-        }
 
-        return response;
-      } catch (error: any) {
-        if (axios.isAxiosError(error) && error.response?.status === 401) {
-          if (!loop) {
-            logger.warn("401 detected. Retrying with fresh token...");
-            this.cache.del("auth_token");
-            await this.getToken(true);
-            return this.makeRequest(endpoint, params, isFetch, true);
+          if (cacheable) {
+            this.cache.set(cacheKey, response, 21600); // 6 hours TTL
           }
+          return response;
+        } catch (error: any) {
+          if (axios.isAxiosError(error) && error.response?.status === 401) {
+            if (!loop) {
+              logger.warn("401 detected. Retrying with fresh token...");
+              this.cache.del("auth_token");
+              await this.getToken(true);
+              return this.makeRequest(endpoint, params, isFetch, true);
+            }
+          }
+          throw error;
         }
-        throw error;
-      }
-    });
+      });
+    };
+
+    if (cacheable) {
+      const promise = runRequest().finally(() => {
+        this.inFlight.delete(cacheKey);
+      });
+      this.inFlight.set(cacheKey, promise);
+      return promise;
+    }
+
+    return runRequest();
   }
 
   async getChannelGroups() {

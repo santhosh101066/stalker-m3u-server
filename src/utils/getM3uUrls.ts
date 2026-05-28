@@ -26,7 +26,7 @@ function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
       .replaceAll(" - ", "-")}`,
     command: channel.cmd.includes(initialConfig.hostname)
       ? `http://${host}/portal/proxy?url=${encodeURIComponent(
-          btoa(channel.cmd.split(" ").at(1) ?? ""),
+          btoa(channel.cmd.includes(" ") ? (channel.cmd.split(" ").at(1) ?? "") : channel.cmd),
         )}`
       : `http://${host}/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}`,
   };

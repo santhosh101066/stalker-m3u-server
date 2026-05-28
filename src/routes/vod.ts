@@ -2,6 +2,7 @@ import { ServerRoute } from "@hapi/hapi";
 import { serverManager } from "@/serverManager";
 import axios from "axios";
 import { logger } from "@/utils/logger";
+import { initialConfig } from "@/config/server";
 
 export const vodRoutes: ServerRoute[] = [
   {
@@ -36,7 +37,9 @@ export const vodRoutes: ServerRoute[] = [
       logger.info(`[VOD Proxy] Streaming: ${streamUrl}`);
 
       const userAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
+        initialConfig.providerType === "xtream"
+          ? "VLC/3.0.16 LibVLC/3.0.16"
+          : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
       const headers: Record<string, string> = {
         "User-Agent": userAgent,
         Referer: streamUrl,

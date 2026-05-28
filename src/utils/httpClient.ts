@@ -25,7 +25,10 @@ httpClient.interceptors.response.use(
   async (error: AxiosError) => {
     const config = error.config as any;
 
-    if (!config || config.__retryCount >= MAX_RETRIES) {
+    const isAborted = error.message?.toLowerCase().includes("aborted") || 
+                      error.code === "ERR_CANCELED";
+
+    if (!config || config.responseType === "stream" || config.skipRetry || isAborted || config.__retryCount >= MAX_RETRIES) {
       return Promise.reject(error);
     }
 

@@ -322,11 +322,13 @@ export const stalkerV2: ServerRoute[] = [
             .code(500);
         }
 
-        const firstPageData = Array.isArray(firstResult.data)
+        let firstPageData = Array.isArray(firstResult.data)
           ? firstResult.data
           : [];
 
-        const actualTotalItems = firstResult.total_items ?? 0;
+        const actualTotalItems = Number(firstResult.total_items) ?? 0;
+
+
 
         return {
           success: true,
@@ -427,10 +429,12 @@ export const stalkerV2: ServerRoute[] = [
             .code(500);
         }
 
-        const firstPageData = Array.isArray(firstResult.data)
+        let firstPageData = Array.isArray(firstResult.data)
           ? firstResult.data
           : [];
-        const actualTotalItems = firstResult.total_items ?? 0;
+        const actualTotalItems = Number(firstResult.total_items) ?? 0;
+
+
 
         return {
           success: true,
@@ -457,12 +461,23 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const { series = "", id = "", download = 0, token, cmd } = request.query;
-        const movieLink = await serverManager.getProvider().getMovieLink({
-          series: series as string,
-          id: Number(id),
-          download: Number(download),
-          cmd: cmd as string,
-        });
+        const isSeries = series && series !== "0" && series !== "false" && series !== "";
+        let movieLink;
+        if (isSeries) {
+          movieLink = await serverManager.getProvider().getSeriesLink({
+            series: series as string,
+            id: Number(id),
+            download: Number(download),
+            cmd: cmd as string,
+          });
+        } else {
+          movieLink = await serverManager.getProvider().getMovieLink({
+            series: series as string,
+            id: Number(id),
+            download: Number(download),
+            cmd: cmd as string,
+          });
+        }
         return movieLink;
       } catch (err) {
         console.error(err);

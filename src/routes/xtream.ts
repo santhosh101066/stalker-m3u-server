@@ -4,6 +4,7 @@ import { liveStreamService } from "@/services/LiveStreamService";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
 import { initialConfig } from "@/config/server";
+import { handleProxyStream } from "./proxy";
 
 export const xtreamRoutes: ServerRoute[] = [
   {
@@ -57,11 +58,13 @@ export const xtreamRoutes: ServerRoute[] = [
       }
 
       if (initialConfig.proxy) {
-        return h
-          .response(
-            "Direct TS access via this route not supported in new proxy engine",
-          )
-          .code(501);
+        try {
+          const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/live/${initialConfig.username}/${initialConfig.password}/${streamId}.ts`;
+          return await handleProxyStream(request, h, upstreamUrl);
+        } catch (err: any) {
+          logger.error(`Error proxying live TS stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
+        }
       } else {
         try {
           const redirectedUrl = await serverManager
@@ -79,6 +82,44 @@ export const xtreamRoutes: ServerRoute[] = [
           logger.error(`Non-proxy error: ${message}`);
           return h.response({ error: "Stream fetch failed" }).code(500);
         }
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/movie/{username}/{password}/{streamId}.{extension}",
+    handler: async (request, h) => {
+      const { streamId, extension } = request.params;
+      const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${initialConfig.username}/${initialConfig.password}/${streamId}.${extension}`;
+
+      if (initialConfig.proxy) {
+        try {
+          return await handleProxyStream(request, h, upstreamUrl);
+        } catch (err: any) {
+          logger.error(`Error proxying movie stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
+        }
+      } else {
+        return h.redirect(upstreamUrl).code(302);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/series/{username}/{password}/{episodeId}.{extension}",
+    handler: async (request, h) => {
+      const { episodeId, extension } = request.params;
+      const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/series/${initialConfig.username}/${initialConfig.password}/${episodeId}.${extension}`;
+
+      if (initialConfig.proxy) {
+        try {
+          return await handleProxyStream(request, h, upstreamUrl);
+        } catch (err: any) {
+          logger.error(`Error proxying series stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
+        }
+      } else {
+        return h.redirect(upstreamUrl).code(302);
       }
     },
   },
