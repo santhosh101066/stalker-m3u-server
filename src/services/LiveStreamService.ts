@@ -83,12 +83,14 @@ export class LiveStreamService {
 
     const lines = res.data.split("\n");
     const segments = new Map<number, string>();
+    let subpath: string | undefined;
 
     const modifiedLines = lines.map((line: string) => {
       if (line.startsWith("#") || line.trim() === "") {
         return line;
       }
       if (line.endsWith(".m3u8")) {
+        if (!subpath) subpath = line.trim();
         return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1&subpath=${encodeURIComponent(line)}`;
       }
 
@@ -99,7 +101,7 @@ export class LiveStreamService {
       return this.generateSignedUrl(resourceId);
     });
 
-    this.cache.set(cmd, { baseUrl, segments } as CacheRecord);
+    this.cache.set(cmd, { baseUrl, segments, subpath } as CacheRecord);
     return modifiedLines.join("\n");
   }
 
@@ -339,7 +341,15 @@ export class LiveStreamService {
     let record: CacheRecord | undefined = this.cache.get(cmd);
 
     if (!record || !record.segments.has(seqId)) {
-      await this.populateCache(cmd);
+      if (!record) {
+        await this.populateCache(cmd);
+        record = this.cache.get(cmd);
+      }
+      const subpath = record?.subpath;
+      logger.info(
+        `[LiveStreamService] Segment ${seqId} missing in cache for ${cmd}. Refreshing playlist (subpath=${subpath})...`,
+      );
+      await this.getPlaylist(cmd, subpath ? "1" : undefined, subpath);
       record = this.cache.get(cmd);
       if (!record || !record.segments.has(seqId)) {
         throw new Error("Segment not found");

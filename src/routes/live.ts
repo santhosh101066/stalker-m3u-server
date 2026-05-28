@@ -268,16 +268,48 @@ export const liveRoutes: ServerRoute[] = [
     method: "GET",
     path: "/live.m3u8",
     handler: async (request, h) => {
-      const { cmd, play, id, start_time, end_time } = request.query as {
+      const { cmd, play, id, start_time, end_time, proxy: proxyParam } = request.query as {
         cmd?: string;
         play?: string;
         id?: string;
         start_time?: string;
         end_time?: string;
+        proxy?: string;
       };
       if (!cmd) return h.response({ error: "Missing cmd parameter" }).code(400);
-      if (id) {
+      if (id && initialConfig.providerType !== "xtream") {
         stalkerApi.setActiveChannel(id);
+      }
+
+      if (initialConfig.providerType === "xtream") {
+        const useProxy = initialConfig.proxy && proxyParam !== "0";
+        if (useProxy) {
+          const { liveStreamService } = await import("@/services/LiveStreamService");
+          const { subpath } = request.query as { subpath?: string };
+          const result = await liveStreamService.getPlaylist(cmd, play, subpath);
+          if (typeof result === "string") {
+            return h.response(result).type("application/vnd.apple.mpegurl");
+          } else {
+            return h.response({ error: result.error }).code(result.code);
+          }
+        } else {
+          try {
+            const { serverManager } = await import("@/serverManager");
+            const redirectedUrl = await serverManager
+              .getProvider()
+              .getChannelLink(cmd)
+              .then((res) => res.js.cmd);
+            if (redirectedUrl) {
+              return h.redirect(redirectedUrl).code(302);
+            }
+            return h
+              .response({ error: "Unable to fetch stream [Non Proxy]" })
+              .code(400);
+          } catch (err: any) {
+            logger.error(`Non-proxy error: ${err.message || err}`);
+            return h.response({ error: "Stream fetch failed" }).code(500);
+          }
+        }
       }
 
       if (start_time && end_time) {
@@ -293,7 +325,8 @@ export const liveRoutes: ServerRoute[] = [
         }
       }
 
-      if (initialConfig.proxy) return handleProxy(cmd, play, h);
+      const useProxy = initialConfig.proxy && proxyParam !== "0";
+      if (useProxy) return handleProxy(cmd, play, h);
       return handleNonProxy(cmd, h);
     },
   },
@@ -311,6 +344,29 @@ export const liveRoutes: ServerRoute[] = [
 
         if (resourceId.endsWith(".ts")) {
           resourceId = resourceId.slice(0, -3);
+        }
+
+        if (initialConfig.providerType === "xtream") {
+          const { liveStreamService } = await import("@/services/LiveStreamService");
+          try {
+            const streamResponse = await liveStreamService.getSegment(resourceId, sig, request.headers);
+            const response = h
+              .response(streamResponse.data)
+              .code(streamResponse.status)
+              .type(streamResponse.headers["content-type"] || "application/octet-stream");
+
+            ["content-length", "accept-ranges", "content-range"].forEach(
+              (header) => {
+                if (streamResponse.headers[header]) {
+                  response.header(header, streamResponse.headers[header]);
+                }
+              },
+            );
+            return response;
+          } catch (err: any) {
+            logger.error(`[Player] Xtream Segment fetch error: ${err.message || err}`);
+            return h.response(err.message || "Segment fetch failed").code(err.response?.status || 502);
+          }
         }
 
         if (!verifySignedUrl(resourceId, sig)) {

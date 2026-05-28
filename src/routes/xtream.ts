@@ -1,5 +1,6 @@
 import { ServerRoute } from "@hapi/hapi";
 import { Channel } from "@/models/Channel";
+import { ConfigProfile } from "@/models/ConfigProfile";
 import { liveStreamService } from "@/services/LiveStreamService";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
@@ -12,12 +13,25 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/live/{username}/{password}/{streamId}.m3u8",
     handler: async (request, h) => {
       const { streamId } = request.params;
-      const channel = await Channel.findByPk(streamId);
+      const { proxy: proxyParam } = request.query as { proxy?: string };
+      const activeProfile = await ConfigProfile.findOne({
+        where: { isActive: true },
+      });
+      const profileId = activeProfile ? activeProfile.id : 1;
+      const channel = await Channel.findOne({
+        where: {
+          id: [streamId, `${profileId}_${streamId}`],
+        },
+      });
       if (!channel) {
         return h.response("Channel not found").code(404);
       }
 
-      if (initialConfig.proxy) {
+      const useProxy = initialConfig.proxy && proxyParam !== "0";
+
+      if (useProxy) {
+        // Pass the real upstream channel cmd (not a loopback URL) so
+        // LiveStreamService fetches directly from the Xtream provider.
         const result = await liveStreamService.getPlaylist(
           channel.cmd,
           undefined,
@@ -52,15 +66,26 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/live/{username}/{password}/{streamId}.ts",
     handler: async (request, h) => {
       const { streamId } = request.params;
-      const channel = await Channel.findByPk(streamId);
+      const { proxy: proxyParam } = request.query as { proxy?: string };
+      const activeProfile = await ConfigProfile.findOne({
+        where: { isActive: true },
+      });
+      const profileId = activeProfile ? activeProfile.id : 1;
+      const channel = await Channel.findOne({
+        where: {
+          id: [streamId, `${profileId}_${streamId}`],
+        },
+      });
       if (!channel) {
         return h.response("Channel not found").code(404);
       }
 
-      if (initialConfig.proxy) {
+      const useProxy = initialConfig.proxy && proxyParam !== "0";
+
+      if (useProxy) {
         try {
-          const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/live/${initialConfig.username}/${initialConfig.password}/${streamId}.ts`;
-          return await handleProxyStream(request, h, upstreamUrl);
+          // Proxy the TS segment directly from the upstream Xtream provider.
+          return await handleProxyStream(request, h, channel.cmd);
         } catch (err: any) {
           logger.error(`Error proxying live TS stream: ${err.message || err}`);
           return h.response({ error: "Stream proxy failed" }).code(502);

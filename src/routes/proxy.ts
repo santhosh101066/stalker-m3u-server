@@ -170,6 +170,7 @@ export const proxy: ServerRoute[] = [
         const resp = await httpClient.get<string>(playlistUrl, {
           responseType: "text",
           headers,
+          timeout: 15000,
         });
 
         if (resp.status < 200 || resp.status >= 300) {

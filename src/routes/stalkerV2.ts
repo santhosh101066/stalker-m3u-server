@@ -21,6 +21,18 @@ const getActiveProfileId = async () => {
   return activeProfile?.id;
 };
 
+const mapChannel = (channel: any) => {
+  let cmdUrl = channel.cmd;
+  if (initialConfig.providerType === "stalker") {
+    cmdUrl = `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`;
+  }
+  return {
+    ...channel,
+    cmd: cmdUrl,
+    isPortal: initialConfig.providerType === "stalker",
+  };
+};
+
 export const stalkerV2: ServerRoute[] = [
   {
     method: "GET",
@@ -118,12 +130,13 @@ export const stalkerV2: ServerRoute[] = [
             initialConfig.playCensored || String(channel.censored) !== "1",
         );
         await writeChannels(filteredChannels, profileId);
+        const mappedChannels = filteredChannels.map(mapChannel);
         const genres = await readGenres("channel", profileId);
         // If no genres are loaded yet, skip genre filtering to avoid returning empty
         if (genres.length === 0) {
-          return filteredChannels ?? [];
+          return mappedChannels ?? [];
         }
-        return (filteredChannels ?? []).filter((channel) => {
+        return (mappedChannels ?? []).filter((channel) => {
           const genre = genres.find((r) => r.id === String(channel.tv_genre_id));
           return (
             genre &&
@@ -150,14 +163,7 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = await readGenres("channel", profileId);
-        const mapped = (channels ?? []).map((channel) => ({
-          ...channel,
-          cmd:
-            initialConfig.providerType === "stalker"
-              ? `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`
-              : channel.cmd,
-          isPortal: initialConfig.providerType === "stalker",
-        }));
+        const mapped = (channels ?? []).map(mapChannel);
         // If no genres loaded yet, skip genre filtering
         if (genres.length === 0) {
           return mapped.sort((a, b) => a.name.localeCompare(b.name));
@@ -272,7 +278,7 @@ export const stalkerV2: ServerRoute[] = [
           sort,
         } = request.query;
 
-        if (category == 0) {
+        if (category == 0 && movieId == 0) {
           return h.redirect("/api/v2/movie-groups");
         }
 
@@ -294,6 +300,24 @@ export const stalkerV2: ServerRoute[] = [
               token,
               sort: sortParam,
             });
+
+            // Tag items based on request context — same logic as /api/v2/series:
+            // • seasonId set + no episodeId  → portal returned episode cards → mark is_episode
+            // • movieId set + no seasonId/episodeId → portal returned season folders → mark is_season
+            if (res && res.js && Array.isArray(res.js.data)) {
+              const isSeasonContext = !!seasonId && !episodeId;
+              const isSeriesContext = !!movieId && !seasonId && !episodeId;
+              res.js.data = res.js.data.map((item: any) => {
+                const isEpisode = isSeasonContext || !!item.series_number || item.is_episode;
+                const isSeason = isSeriesContext && !isEpisode;
+                return {
+                  ...item,
+                  is_episode: isEpisode ? 1 : item.is_episode,
+                  ...(isSeason && { is_season: true }),
+                };
+              });
+            }
+
             return { page: pageNum, ...res.js };
           } catch (err) {
             console.error(`Failed to fetch page ${pageNum}: ${err}`);

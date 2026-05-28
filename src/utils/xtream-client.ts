@@ -115,6 +115,11 @@ export class XtreamClient implements IProvider {
           password: this.password,
           ...params,
         },
+        headers: {
+          "User-Agent": "VLC/3.0.16 LibVLC/3.0.16",
+          Accept: "*/*",
+          "Accept-Encoding": "gzip, deflate, br",
+        },
         timeout: 30000, // 30 s — prevents server hang on slow/dead upstream
       })
       .then((response) => {
@@ -203,8 +208,6 @@ export class XtreamClient implements IProvider {
   }
 
   async getChannelLink(cmd: string): Promise<Data<Program>> {
-    console.log(cmd);
-
     return {
       js: {
         id: "0",
@@ -291,12 +294,12 @@ export class XtreamClient implements IProvider {
               : info.duration
                 ? parseDurationToMinutes(info.duration)
                 : 0,
-            description: info.description || info.plot || "",
-            director: info.director || "",
-            actors: info.actors || info.cast || "",
-            year: info.releasedate ? info.releasedate.split("-")[0] : "",
-            country: info.country || "",
-            genres_str: info.genre || "",
+            description: (info.description || info.plot || "").trim() || "No description available",
+            director: (info.director || "").trim() || "-",
+            actors: (info.actors || info.cast || "").trim() || "-",
+            year: (info.releasedate ? info.releasedate.split("-")[0] : "").trim() || "-",
+            country: (info.country || "").trim() || "-",
+            genres_str: (info.genre || "").trim() || "-",
           };
 
           return {
@@ -346,11 +349,12 @@ export class XtreamClient implements IProvider {
       : videos;
 
     if (params.sort) {
-      if (params.sort === "latest") {
+      const s = params.sort.toLowerCase();
+      if (s === "latest" || s === "added") {
         filteredVideos.sort((a, b) => b.time - a.time);
-      } else if (params.sort === "oldest") {
+      } else if (s === "oldest") {
         filteredVideos.sort((a, b) => a.time - b.time);
-      } else if (params.sort === "alphabetic") {
+      } else if (s === "alphabetic" || s === "name") {
         filteredVideos.sort((a, b) => a.name.localeCompare(b.name));
       }
     }
@@ -453,12 +457,12 @@ export class XtreamClient implements IProvider {
               series_number: parseInt(seasonNumStr),
               episode_number: parseInt(ep.episode_num),
               // Enriched Metadata
-              description: ep.info?.plot || data.info?.plot || "",
-              director: ep.info?.director || data.info?.director || "",
-              actors: ep.info?.cast || data.info?.cast || "",
-              genres_str: data.info?.genre || "",
-              year: ep.info?.releaseDate ? ep.info.releaseDate.split("-")[0] : (data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : ""),
-              country: data.info?.country || "",
+              description: (ep.info?.plot || data.info?.plot || "").trim() || "No description available",
+              director: (ep.info?.director || data.info?.director || "").trim() || "-",
+              actors: (ep.info?.cast || data.info?.cast || "").trim() || "-",
+              genres_str: (data.info?.genre || "").trim() || "-",
+              year: (ep.info?.releaseDate ? ep.info.releaseDate.split("-")[0] : (data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : "")).trim() || "-",
+              country: (data.info?.country || "").trim() || "-",
             });
           });
         }
@@ -531,12 +535,12 @@ export class XtreamClient implements IProvider {
             series: [], // <-- THIS IS THE FIX! Nesting episodes here
             is_season: 1,
             // Enriched Metadata
-            description: data.info?.plot || "",
-            director: data.info?.director || "",
-            actors: data.info?.cast || "",
-            genres_str: data.info?.genre || "",
-            year: data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : "",
-            country: data.info?.country || "",
+            description: (data.info?.plot || "").trim() || "No description available",
+            director: (data.info?.director || "").trim() || "-",
+            actors: (data.info?.cast || "").trim() || "-",
+            genres_str: (data.info?.genre || "").trim() || "-",
+            year: (data.info?.releaseDate ? data.info.releaseDate.split("-")[0] : "").trim() || "-",
+            country: (data.info?.country || "").trim() || "-",
           });
         });
       }
@@ -578,12 +582,12 @@ export class XtreamClient implements IProvider {
       series: [],
       is_series: 1,
       // Enriched Metadata
-      description: item.plot || "",
-      director: item.director || "",
-      actors: item.cast || "",
-      genres_str: item.genre || "",
-      year: item.releaseDate ? item.releaseDate.split("-")[0] : "",
-      country: item.country || "",
+      description: (item.plot || "").trim() || "No description available",
+      director: (item.director || "").trim() || "-",
+      actors: (item.cast || "").trim() || "-",
+      genres_str: (item.genre || "").trim() || "-",
+      year: (item.releaseDate ? item.releaseDate.split("-")[0] : "").trim() || "-",
+      country: (item.country || "").trim() || "-",
     }));
 
     let filteredSeries = params.search
@@ -593,11 +597,12 @@ export class XtreamClient implements IProvider {
       : series;
 
     if (params.sort) {
-      if (params.sort === "latest") {
+      const s = params.sort.toLowerCase();
+      if (s === "latest" || s === "added") {
         filteredSeries.sort((a, b) => b.time - a.time);
-      } else if (params.sort === "oldest") {
+      } else if (s === "oldest") {
         filteredSeries.sort((a, b) => a.time - b.time);
-      } else if (params.sort === "alphabetic") {
+      } else if (s === "alphabetic" || s === "name") {
         filteredSeries.sort((a, b) => a.name.localeCompare(b.name));
       }
     }
