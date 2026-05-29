@@ -29,6 +29,7 @@ const mapChannel = (channel: any) => {
   return {
     ...channel,
     cmd: cmdUrl,
+    screenshot_uri: channel.logo || channel.screenshot_uri || "",
     isPortal: initialConfig.providerType === "stalker",
   };
 };

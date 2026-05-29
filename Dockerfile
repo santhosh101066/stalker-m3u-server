@@ -4,7 +4,7 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Install system dependencies
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata ffmpeg
 
 # Set Timezone to IST
 

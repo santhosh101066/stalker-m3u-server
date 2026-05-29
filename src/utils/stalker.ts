@@ -86,7 +86,7 @@ export class StalkerAPI implements IProvider {
     this.loadTokenFromDB();
   }
 
-  private async loadTokenFromDB() {
+  async loadTokenFromDB() {
     try {
       const tokenRecord = await Token.findOne({ where: { isValid: true } });
       if (tokenRecord?.token) {
@@ -367,7 +367,11 @@ export class StalkerAPI implements IProvider {
   }
 
   clearCache() {
+    const token = this.cache.get("auth_token");
     this.cache.flushAll();
+    if (token) {
+      this.cache.set("auth_token", token, 3600);
+    }
     this.random = "";
   }
 
@@ -655,7 +659,6 @@ export class StalkerAPI implements IProvider {
     const params: any = {
       type: "vod",
       action: "get_ordered_list",
-      category,
       genre: "*",
       p: page,
       sortby: sort || "added",
@@ -663,6 +666,10 @@ export class StalkerAPI implements IProvider {
       season_id: seasonId,
       episode_id: episodeId,
     };
+
+    if (category && category !== "*") {
+      params.category = category;
+    }
 
     if (search) {
       params.search = search;
@@ -690,7 +697,6 @@ export class StalkerAPI implements IProvider {
     const params: any = {
       type: "vod",
       action: "get_ordered_list",
-      category,
       genre: "*",
       p: page,
       sortby: sort || "added",
@@ -699,6 +705,10 @@ export class StalkerAPI implements IProvider {
       episode_id: episodeId,
       ...others,
     };
+
+    if (category && category !== "*") {
+      params.category = category;
+    }
 
     if (search) {
       params.search = search;

@@ -27,8 +27,9 @@ httpClient.interceptors.response.use(
 
     const isAborted = error.message?.toLowerCase().includes("aborted") || 
                       error.code === "ERR_CANCELED";
+    const isTimeout = error.code === "ECONNABORTED" || error.code === "ETIMEDOUT" || error.message?.toLowerCase().includes("timeout");
 
-    if (!config || config.responseType === "stream" || config.skipRetry || isAborted || config.__retryCount >= MAX_RETRIES) {
+    if (!config || config.responseType === "stream" || config.skipRetry || isAborted || isTimeout || config.__retryCount >= MAX_RETRIES) {
       return Promise.reject(error);
     }
 

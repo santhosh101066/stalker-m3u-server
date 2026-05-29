@@ -29,6 +29,7 @@ class ServerManager {
       logger.info("Initialized Xtream Codes Provider");
     } else {
       this.provider = stalkerApi;
+      stalkerApi.loadTokenFromDB();
       logger.info("Initialized Stalker Provider");
     }
   }
