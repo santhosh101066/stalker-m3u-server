@@ -52,12 +52,12 @@ export class StalkerAPI implements IProvider {
   private isProfileFetching: boolean = false;
 
   private profileRefreshPromise: Promise<string | null> | null = null;
+  private inFlight = new Map<string, Promise<any>>();
 
   private watchdogInterval: NodeJS.Timeout | null = null;
   private watchdogStarted: boolean = false;
   private activeChannelId: string = "0";
   private lastRequestTime: number = 0;
-  private inFlight = new Map<string, Promise<any>>();
 
   private getCacheKey(endpoint: string, params: Record<string, any>): string {
     const keyParts = [endpoint];
@@ -65,7 +65,9 @@ export class StalkerAPI implements IProvider {
       .sort()
       .forEach((key) => {
         if (key !== "token" && key !== "timestamp" && key !== "api_signature") {
-          keyParts.push(`${key}:${typeof params[key] === "object" ? JSON.stringify(params[key]) : params[key]}`);
+          keyParts.push(
+            `${key}:${typeof params[key] === "object" ? JSON.stringify(params[key]) : params[key]}`,
+          );
         }
       });
     return keyParts.join("|");
@@ -73,13 +75,31 @@ export class StalkerAPI implements IProvider {
 
   private isCacheable(params: Record<string, any>): boolean {
     const cacheableActions = [
-      "get_ordered_list",
       "get_genres",
       "get_all_channels",
+      "get_categories",
+      "get_ordered_list",
+      "get_epg",
+      "get_all_program_for_ch",
       "get_short_epg",
-      "get_profile"
     ];
     return cacheableActions.includes(params.action);
+  }
+
+  private getCacheTTL(action: string): number {
+    switch (action) {
+      case "get_genres":
+      case "get_categories":
+      case "get_all_channels":
+        return 21600; // 6 hours
+      case "get_ordered_list":
+      case "get_epg":
+      case "get_all_program_for_ch":
+      case "get_short_epg":
+        return 600; // 10 minutes
+      default:
+        return 600;
+    }
   }
 
   constructor() {
@@ -369,6 +389,7 @@ export class StalkerAPI implements IProvider {
   clearCache() {
     const token = this.cache.get("auth_token");
     this.cache.flushAll();
+    this.inFlight.clear();
     if (token) {
       this.cache.set("auth_token", token, 3600);
     }
@@ -482,6 +503,11 @@ export class StalkerAPI implements IProvider {
         );
       }
 
+      if (profile.js.id || profile.js.uid) {
+        this.uid = String(profile.js.id || profile.js.uid);
+        logger.info(`[StalkerAPI] Set UID to: ${this.uid}`);
+      }
+
       if (profile.js.blocked === 1 || profile.js.blocked === "1") {
         logger.error(`[StalkerAPI] Account is BLOCKED: ${profile.js.blocked}`);
         throw new Error("Subscription blocked by portal");
@@ -506,7 +532,6 @@ export class StalkerAPI implements IProvider {
     endpoint: string,
     params: Record<string, any> = {},
     isFetch = true,
-    loop = false,
   ): Promise<T> {
     this.lastRequestTime = Date.now();
 
@@ -518,19 +543,26 @@ export class StalkerAPI implements IProvider {
       if (cached !== undefined) {
         return cached;
       }
-      if (this.inFlight.has(cacheKey)) {
-        return this.inFlight.get(cacheKey)!;
+      const pending = this.inFlight.get(cacheKey);
+      if (pending) {
+        return pending;
       }
     }
 
-    const runRequest = async (): Promise<T> => {
-      return requestLimit(async () => {
+    const execute = async (): Promise<T> => {
+      let attempts = 0;
+      const maxAttempts = 2;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+
         if (this.profileRefreshPromise) {
           logger.info(
-            `[makeRequest] Waiting for ongoing auth before requesting ${endpoint}...`,
+            `[makeRequest] Waiting for ongoing auth before requesting ${endpoint} (attempt ${attempts})...`,
           );
           await this.profileRefreshPromise;
         }
+
         let token = this.cache.get<string>("auth_token");
         if (!token) {
           token = (await this.getToken(false)) || "";
@@ -539,72 +571,77 @@ export class StalkerAPI implements IProvider {
         const url = `${this.getBaseUrl()}${endpoint}`;
 
         try {
-          const response = await httpRequest(
-            url,
-            { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
-            (() => {
-              const config = this._getAxiosRequestConfig({}, token!, {
-                referrer: this.getBaseUrl(),
-              });
-              return {
-                method: config.method,
-                headers: config.headers as Record<string, string>,
-                timeout: config.timeout,
-              };
-            })(),
-          );
+          const response = await requestLimit(async () => {
+            return httpRequest(
+              url,
+              { ...params, uid: this.uid, JsHttpRequest: "1-xml" },
+              (() => {
+                const config = this._getAxiosRequestConfig({}, token!, {
+                  referrer: this.getBaseUrl(),
+                });
+                return {
+                  method: config.method,
+                  headers: config.headers as Record<string, string>,
+                  timeout: config.timeout,
+                };
+              })(),
+            );
+          });
 
           if (
             (typeof response === "string" &&
               response.startsWith("Authorization failed.")) ||
             response === "Authorization failed."
           ) {
-            if (!loop) {
-              logger.info(
-                `Auth failed for ${endpoint}. Handling token refresh...`,
-              );
-
+            logger.warn(
+              `[StalkerAPI] Auth failed (portal message) for ${endpoint}. Attempt ${attempts}/${maxAttempts}`,
+            );
+            if (attempts < maxAttempts) {
               if (!this.profileRefreshPromise) {
                 this.cache.del("auth_token");
-
                 this.getToken(true).catch((err) =>
                   logger.error(`Token refresh failed: ${err}`),
                 );
               }
-
-              await this.profileRefreshPromise;
-              return this.makeRequest(endpoint, params, isFetch, true);
+              continue;
             }
             throw new Error("Authorization Failed.");
           }
 
           if (cacheable) {
-            this.cache.set(cacheKey, response, 21600); // 6 hours TTL
+            const ttl = this.getCacheTTL(params.action);
+            this.cache.set(cacheKey, response, ttl);
           }
           return response;
         } catch (error: any) {
-          if (axios.isAxiosError(error) && error.response?.status === 401) {
-            if (!loop) {
-              logger.warn("401 detected. Retrying with fresh token...");
-              this.cache.del("auth_token");
-              await this.getToken(true);
-              return this.makeRequest(endpoint, params, isFetch, true);
+          const is401 = axios.isAxiosError(error) && error.response?.status === 401;
+          if (is401) {
+            logger.warn(
+              `[StalkerAPI] HTTP 401 detected for ${endpoint}. Attempt ${attempts}/${maxAttempts}`,
+            );
+            if (attempts < maxAttempts) {
+              if (!this.profileRefreshPromise) {
+                this.cache.del("auth_token");
+                await this.getToken(true);
+              }
+              continue;
             }
           }
           throw error;
         }
-      });
+      }
+      throw new Error("Request failed after maximum authorization attempts.");
     };
 
     if (cacheable) {
-      const promise = runRequest().finally(() => {
+      const promise = execute().finally(() => {
         this.inFlight.delete(cacheKey);
       });
       this.inFlight.set(cacheKey, promise);
       return promise;
     }
 
-    return runRequest();
+    return execute();
   }
 
   async getChannelGroups() {
@@ -647,7 +684,7 @@ export class StalkerAPI implements IProvider {
   }
 
   async getMovies({
-    category,
+    category = "*",
     page,
     movieId = 0,
     seasonId = 0,
@@ -659,6 +696,7 @@ export class StalkerAPI implements IProvider {
     const params: any = {
       type: "vod",
       action: "get_ordered_list",
+      category,
       genre: "*",
       p: page,
       sortby: sort || "added",
@@ -666,10 +704,6 @@ export class StalkerAPI implements IProvider {
       season_id: seasonId,
       episode_id: episodeId,
     };
-
-    if (category && category !== "*") {
-      params.category = category;
-    }
 
     if (search) {
       params.search = search;
@@ -679,12 +713,11 @@ export class StalkerAPI implements IProvider {
       this.getPhpUrl(),
       params,
       true,
-      false,
     );
   }
 
   async getSeries({
-    category,
+    category = "*",
     page,
     movieId = 0,
     seasonId = 0,
@@ -697,6 +730,7 @@ export class StalkerAPI implements IProvider {
     const params: any = {
       type: "vod",
       action: "get_ordered_list",
+      category,
       genre: "*",
       p: page,
       sortby: sort || "added",
@@ -706,10 +740,6 @@ export class StalkerAPI implements IProvider {
       ...others,
     };
 
-    if (category && category !== "*") {
-      params.category = category;
-    }
-
     if (search) {
       params.search = search;
     }
@@ -718,7 +748,6 @@ export class StalkerAPI implements IProvider {
       this.getPhpUrl(),
       params,
       true,
-      false,
     );
   }
 
