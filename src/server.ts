@@ -69,17 +69,22 @@ const init = async () => {
     method: "GET",
     path: "/{param*}",
     handler: (request, h) => {
+      const param = request.params.param || "";
       const filePath = path.join(
         process.cwd(),
         "public",
-        request.params.param || "",
+        param,
       );
 
       if (
+        !param.startsWith("uploads/") &&
         !filePath.endsWith(".js") &&
         !filePath.endsWith(".css") &&
         !filePath.endsWith(".png") &&
         !filePath.endsWith(".jpg") &&
+        !filePath.endsWith(".jpeg") &&
+        !filePath.endsWith(".webp") &&
+        !filePath.endsWith(".gif") &&
         !filePath.endsWith(".ico") &&
         !filePath.endsWith(".svg") &&
         !filePath.endsWith(".webmanifest")

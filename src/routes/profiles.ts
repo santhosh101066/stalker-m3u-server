@@ -141,6 +141,12 @@ export const profileRoutes: ServerRoute[] = [
           await serverManager.reloadConfig();
           stalkerApi.clearCache();
 
+          // Clear database channels, genres and epgCache for this active profile
+          await Channel.destroy({ where: { profileId } });
+          await Genre.destroy({ where: { profileId } });
+          await EpgCache.destroy({ where: { profileId } });
+          console.log(`Cleared cached database records for profile: ${profile.name}`);
+
           const hash = crypto.createHash("md5").update(JSON.stringify(payload.config)).digest("hex");
           socketService.broadcastConfigChange(hash);
         }

@@ -8,6 +8,10 @@ import { ConfigProfile } from "@/models/ConfigProfile";
 import crypto from "crypto";
 import { socketService } from "@/services/SocketService";
 import { createJWT, authCheck } from "@/utils/jwt";
+import { SystemConfig } from "../models/SystemConfig";
+import { Channel } from "@/models/Channel";
+import { Genre } from "@/models/Genre";
+import { EpgCache } from "@/models/EpgCache";
 
 export const configRoutes: ServerRoute[] = [
   {
@@ -45,6 +49,13 @@ export const configRoutes: ServerRoute[] = [
           console.log(
             `Updated configuration for active profile: ${activeProfile.name}`,
           );
+
+          // Clear database channels, genres and epgCache to force a fresh sync
+          const profileId = activeProfile.id;
+          await Channel.destroy({ where: { profileId } });
+          await Genre.destroy({ where: { profileId } });
+          await EpgCache.destroy({ where: { profileId } });
+          console.log(`Cleared cached database records for profile: ${activeProfile.name}`);
         } else {
           return h
             .response({ error: "No active profile found to update." })
@@ -108,10 +119,95 @@ export const configRoutes: ServerRoute[] = [
       if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
       try {
         serverManager.getProvider().clearCache();
+
+        const activeProfile = await ConfigProfile.findOne({
+          where: { isActive: true },
+        });
+        if (activeProfile) {
+          const profileId = activeProfile.id;
+          await Channel.destroy({ where: { profileId } });
+          await Genre.destroy({ where: { profileId } });
+          await EpgCache.destroy({ where: { profileId } });
+          console.log(`Cleared cached database records for profile: ${activeProfile.name}`);
+        }
+
         return { success: true, message: "Cache cleared successfully." };
       } catch (error: any) {
         console.error("Error clearing cache:", error);
         return h.response({ success: false, error: error.message }).code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/carousel",
+    handler: async (request, h) => {
+      try {
+        const record = await SystemConfig.findOne({
+          where: { key: "carousel_slides" },
+        });
+        return record ? record.value : [];
+      } catch (error) {
+        console.error("Error fetching carousel config:", error);
+        return h.response({ error: "Failed to fetch carousel configuration" }).code(500);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/carousel",
+    handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+      try {
+        const payload = request.payload;
+        await SystemConfig.upsert({
+          key: "carousel_slides",
+          value: payload,
+        });
+        return { success: true, message: "Carousel configuration updated successfully." };
+      } catch (error) {
+        console.error("Error updating carousel config:", error);
+        return h.response({ error: "Failed to update carousel configuration" }).code(500);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/upload",
+    options: {
+      payload: {
+        output: "data",
+        parse: true,
+        multipart: true,
+        maxBytes: 10 * 1024 * 1024, // 10MB limit
+      },
+    },
+    handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+      try {
+        const payload = request.payload as any;
+        const file = payload?.file;
+        if (!file) {
+          return h.response({ error: "No file provided" }).code(400);
+        }
+
+        const filename = file.hapi?.filename || `upload-${Date.now()}`;
+        const cleanFilename = filename.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+        const uniqueFilename = `${Date.now()}-${cleanFilename}`;
+        
+        const uploadDir = path.join(process.cwd(), "public", "uploads");
+        await fs.mkdir(uploadDir, { recursive: true });
+
+        const filePath = path.join(uploadDir, uniqueFilename);
+        await fs.writeFile(filePath, file);
+
+        return {
+          success: true,
+          url: `/uploads/${uniqueFilename}`,
+        };
+      } catch (error) {
+        console.error("Error during file upload:", error);
+        return h.response({ error: "Failed to upload file" }).code(500);
       }
     },
   },

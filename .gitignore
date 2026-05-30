@@ -30,3 +30,4 @@ stalker-m3u-server.tar
 token.json
 database.sqlite
 temp
+public/uploads

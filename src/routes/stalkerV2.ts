@@ -306,11 +306,30 @@ export const stalkerV2: ServerRoute[] = [
             // • seasonId set + no episodeId  → portal returned episode cards → mark is_episode
             // • movieId set + no seasonId/episodeId → portal returned season folders → mark is_season
             if (res && res.js && Array.isArray(res.js.data)) {
+              if (movieId && Number(movieId) !== 0) {
+                const found = res.js.data.find((item: any) => String(item.id) === String(movieId));
+                if (found) {
+                  res.js.data = [found];
+                } else {
+                  if (!seasonId && !episodeId) {
+                    res.js.data = [{
+                      id: String(movieId),
+                      name: "Featured Movie",
+                      cmd: `/media/${movieId}.mpg`,
+                      screenshot_uri: "",
+                      category_id: category ? String(category) : "0",
+                      time: 0,
+                      rating_imdb: "0",
+                    }];
+                  }
+                }
+              }
+
               const isSeasonContext = !!seasonId && !episodeId;
               const isSeriesContext = !!movieId && !seasonId && !episodeId;
               res.js.data = res.js.data.map((item: any) => {
                 const isEpisode = isSeasonContext || !!item.series_number || item.is_episode;
-                const isSeason = isSeriesContext && !isEpisode;
+                const isSeason = isSeriesContext && !isEpisode && (item.is_series === "1" || item.is_series === 1);
                 return {
                   ...item,
                   is_episode: isEpisode ? 1 : item.is_episode,
