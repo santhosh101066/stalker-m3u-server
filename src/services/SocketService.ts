@@ -52,6 +52,7 @@ class SocketService {
 
           this.devices.set(socket.id, device);
           this.broadcastReceivers();
+          this.broadcastActiveUserCount();
         },
       );
 
@@ -90,6 +91,7 @@ class SocketService {
           if (device.type === "receiver") {
             this.broadcastReceivers();
           }
+          this.broadcastActiveUserCount();
         }
       });
 
@@ -121,6 +123,11 @@ class SocketService {
   private broadcastReceivers() {
     const receivers = this.getReceivers();
     this.io?.emit("receivers_updated", receivers);
+  }
+
+  private broadcastActiveUserCount() {
+    const count = this.devices.size;
+    this.io?.emit("active_user_count", count);
   }
 
   public broadcastLog(level: string, message: string, timestamp: string) {

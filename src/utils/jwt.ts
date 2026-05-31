@@ -2,9 +2,10 @@ import crypto from "crypto";
 
 const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
 
-export function createJWT(payload: any): string {
+export function createJWT(payload: any, expiresInSeconds?: number): string {
   const head = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-  const payloadWithExp = { ...payload, exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) }; // 1 day expiration
+  const expTime = expiresInSeconds !== undefined ? expiresInSeconds : (24 * 60 * 60); // Default to 1 day
+  const payloadWithExp = { ...payload, exp: Math.floor(Date.now() / 1000) + expTime };
   const body = Buffer.from(JSON.stringify(payloadWithExp)).toString('base64url');
   const sig = crypto.createHmac('sha256', JWT_SECRET).update(`${head}.${body}`).digest('base64url');
   return `${head}.${body}.${sig}`;
@@ -28,11 +29,11 @@ export function verifyJWT(token: string): any | false {
   }
 }
 
-export function authCheck(request: any): boolean {
+export function authCheck(request: any): any | false {
   const authHeader = request.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return false;
   }
   const token = authHeader.split(" ")[1];
-  return !!verifyJWT(token);
+  return verifyJWT(token);
 }

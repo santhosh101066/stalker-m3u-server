@@ -13,6 +13,8 @@ import { Channel } from "@/models/Channel";
 import { Genre } from "@/models/Genre";
 import { EpgCache } from "@/models/EpgCache";
 
+const uploadDir = path.join(process.cwd(), "uploads");
+
 export const configRoutes: ServerRoute[] = [
   {
     method: "GET",
@@ -195,7 +197,7 @@ export const configRoutes: ServerRoute[] = [
         const cleanFilename = filename.replace(/[^a-zA-Z0-9.\-_]/g, "_");
         const uniqueFilename = `${Date.now()}-${cleanFilename}`;
         
-        const uploadDir = path.join(process.cwd(), "public", "uploads");
+        // Custom upload directory use panni save pannikurom Bro!
         await fs.mkdir(uploadDir, { recursive: true });
 
         const filePath = path.join(uploadDir, uniqueFilename);
@@ -209,6 +211,18 @@ export const configRoutes: ServerRoute[] = [
         console.error("Error during file upload:", error);
         return h.response({ error: "Failed to upload file" }).code(500);
       }
+    },
+  },
+  {
+    // Serving Static Files Outside Public Folder Route 🛠️
+    method: "GET",
+    path: "/uploads/{param*}",
+    handler: {
+      directory: {
+        path: uploadDir,
+        redirectToSlash: true,
+        index: false,
+      },
     },
   },
 ];

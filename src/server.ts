@@ -15,11 +15,15 @@ import { portalProxy } from "./routes/portalProxy";
 import { xtreamRoutes } from "./routes/xtream";
 import { hlsRoutes } from "./routes/hls";
 import { vodRoutes } from "./routes/vod";
+import { authRoutes } from "./routes/auth";
+import { userRoutes } from "./routes/user";
+import { userManagementRoutes } from "./routes/userManagement";
 import { socketService } from "./services/SocketService";
 
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
 import { logger } from "./utils/logger";
+import { authCheck } from "./utils/jwt";
 
 const init = async () => {
   await initDB();
@@ -64,6 +68,41 @@ const init = async () => {
   server.route(xtreamRoutes);
   server.route(hlsRoutes);
   server.route(vodRoutes);
+  server.route(authRoutes);
+  server.route(userRoutes);
+  server.route(userManagementRoutes);
+
+  // Global Auth Interceptor for Hapi endpoints
+  server.ext("onPreHandler", (request, h) => {
+    const path = request.path;
+    
+    // Skip auth for static pages, media streams, image proxies, video stream proxies, and authorization endpoints
+    if (
+      (!path.startsWith("/api/") && !path.startsWith("/v2/")) ||
+      path.startsWith("/api/auth/") ||
+      path.startsWith("/api/images/") ||
+      path.startsWith("/api/proxy") ||
+      path.startsWith("/api/media/") ||
+      path.startsWith("/api/vod/") ||
+      path.startsWith("/live.m3u8") ||
+      path.startsWith("/player/") ||
+      path.startsWith("/live/") ||
+      path.startsWith("/movie/") ||
+      path.startsWith("/series/") ||
+      path.startsWith("/portal/proxy")
+    ) {
+      return h.continue;
+    }
+
+    const user = authCheck(request);
+    if (!user) {
+      return h.response({ error: "Unauthorized" }).code(401).takeover();
+    }
+
+    // Attach user metadata to plugins state so handlers can access it
+    (request.plugins as any).user = user;
+    return h.continue;
+  });
 
   server.route({
     method: "GET",
