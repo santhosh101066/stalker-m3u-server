@@ -16,6 +16,7 @@ import { cmdPlayerV2 } from "@/utils/cmdPlayer";
 import { stalkerApi } from "@/utils/stalker";
 import { getEpgCache } from "@/utils/epg";
 import { fetchMovieMeta, fetchTVMeta, TmdbMeta } from "@/utils/tmdb";
+import { SystemConfig } from "@/models/SystemConfig";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -50,6 +51,34 @@ export const xtreamCache = {
     await XtreamCache.destroy({ where: { key } });
   },
 };
+
+// ── Category versioning ────────────────────────────────────────────────────────
+// Each warm cycle that finds new content writes a fresh Unix timestamp as the
+// version. The timestamp is appended to every VOD/series category ID in Xtream
+// API responses. The player sees new category IDs and re-fetches stream lists.
+// Internally all cache lookups always use the bare (unversioned) genre ID, so
+// a single vod_cat_version row in SystemConfig is the only moving part.
+
+async function getVodVersion(): Promise<number> {
+  try {
+    const row = await SystemConfig.findByPk("vod_cat_version");
+    return row ? (Number(row.value) || 1) : 1;
+  } catch { return 1; }
+}
+
+export async function bumpVodVersion(): Promise<void> {
+  const ts = Date.now();
+  await SystemConfig.upsert({ key: "vod_cat_version", value: ts });
+  logger.info(`[Xtream] VOD category version set to ${ts}`);
+}
+
+function addVer(id: string | number, v: number): string {
+  return `${id}_v${v}`;
+}
+
+function stripVer(id: string): string {
+  return id.replace(/_v\d+$/, "");
+}
 
 function userInfo() {
   return {
@@ -123,7 +152,16 @@ async function fetchUntilKnown(
 let seriesWarmRunning = false;
 let vodWarmRunning    = false;
 
+function toUnixAdded(added: any): string {
+  if (!added) return "";
+  const n = Number(added);
+  if (!isNaN(n) && n > 1000000000) return String(n);
+  const d = new Date(added);
+  return isNaN(d.getTime()) ? "" : String(Math.floor(d.getTime() / 1000));
+}
+
 function mapVodItem(m: any, num: number, categoryId: string | number): any {
+  const added = toUnixAdded(m.added);
   if (m.cmd) xtreamCache.set(`vod_cmd_${m.id}`, m.cmd);
   xtreamCache.set(`vod_info_${m.id}`, {
     info: {
@@ -143,7 +181,7 @@ function mapVodItem(m: any, num: number, categoryId: string | number): any {
     movie_data: {
       stream_id:           parseInt(m.id),
       name:                m.name,
-      added:               m.added || "",
+      added,
       category_id:         String(categoryId),
       container_extension: "m3u8",
       custom_sid:          "",
@@ -158,7 +196,7 @@ function mapVodItem(m: any, num: number, categoryId: string | number): any {
     stream_icon:         buildIconUrl(m.screenshot_uri),
     rating:              m.rating_imdb || 0,
     year:                m.year || "",
-    added:               m.added || "",
+    added,
     category_id:         String(categoryId),
     container_extension: "m3u8",
     custom_sid:          "",
@@ -186,9 +224,10 @@ function mapSeriesItem(s: any, num: number, categoryId: string | number): any {
   };
 }
 
-export async function warmSeriesCache(): Promise<void> {
-  if (seriesWarmRunning) { logger.info("[XtreamSeries] Warm already running, skipping"); return; }
+export async function warmSeriesCache(): Promise<boolean> {
+  if (seriesWarmRunning) { logger.info("[XtreamSeries] Warm already running, skipping"); return false; }
   seriesWarmRunning = true;
+  let newContentFound = false;
   try {
     const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
     const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
@@ -228,6 +267,7 @@ export async function warmSeriesCache(): Promise<void> {
         }
 
         if (newSeries.length > 0) {
+          newContentFound = true;
           const result = [
             ...newSeries.map((s, idx) => mapSeriesItem(s, idx + 1, genre.id)),
             ...existing.map((s: any, idx: number) => ({ ...s, num: newSeries.length + idx + 1 })),
@@ -237,6 +277,7 @@ export async function warmSeriesCache(): Promise<void> {
         }
 
         if (newMovies.length > 0) {
+          newContentFound = true;
           const vodKey = `vod_streams_${genre.id}`;
           const result = [
             ...newMovies.map((m, idx) => mapVodItem(m, idx + 1, genre.id)),
@@ -254,7 +295,13 @@ export async function warmSeriesCache(): Promise<void> {
       }
     }
 
-  } finally { seriesWarmRunning = false; }
+  } finally {
+    if (newContentFound) {
+      try { await bumpVodVersion(); } catch (e: any) { logger.error(`[XtreamSeries] Failed to bump version: ${e.message}`); }
+    }
+    seriesWarmRunning = false;
+  }
+  return newContentFound;
 }
 
 export async function warmSeriesInfoCache(): Promise<void> {
@@ -607,6 +654,7 @@ export async function catchupScan(): Promise<void> {
       }
     }
 
+    await bumpVodVersion();
     logger.info("[Catchup] Scan complete");
   } finally {
     catchupRunning = false;
@@ -660,9 +708,10 @@ export async function cleanupGenres(): Promise<void> {
   }
 }
 
-export async function warmVodCache(): Promise<void> {
-  if (vodWarmRunning) { logger.info("[XtreamVod] Warm already running, skipping"); return; }
+export async function warmVodCache(): Promise<boolean> {
+  if (vodWarmRunning) { logger.info("[XtreamVod] Warm already running, skipping"); return false; }
   vodWarmRunning = true;
+  let newContentFound = false;
   try {
     const genres = await readGenres("movie");
     const provider = serverManager.getProvider();
@@ -714,6 +763,7 @@ export async function warmVodCache(): Promise<void> {
         }
 
         if (newMovies.length > 0) {
+          newContentFound = true;
           const result = [
             ...newMovies.map((m, idx) => mapVodItem(m, idx + 1, genre.id)),
             ...existing.map((m: any, idx: number) => ({ ...m, num: newMovies.length + idx + 1 })),
@@ -723,6 +773,7 @@ export async function warmVodCache(): Promise<void> {
         }
 
         if (newSeries.length > 0) {
+          newContentFound = true;
           const seriesKey = `series_list_${genre.id}`;
           const result = [
             ...newSeries.map((s, idx) => mapSeriesItem(s, idx + 1, genre.id)),
@@ -740,7 +791,13 @@ export async function warmVodCache(): Promise<void> {
       }
     }
 
-  } finally { vodWarmRunning = false; }
+  } finally {
+    if (newContentFound) {
+      try { await bumpVodVersion(); } catch (e: any) { logger.error(`[XtreamVod] Failed to bump version: ${e.message}`); }
+    }
+    vodWarmRunning = false;
+  }
+  return newContentFound;
 }
 
 export const xtreamRoutes: ServerRoute[] = [
@@ -867,11 +924,16 @@ export const xtreamRoutes: ServerRoute[] = [
               }));
             await xtreamCache.set("vod_cats", raw);
           }
-          return h.response(await applyXtreamCatOverrides(raw, "movie"));
+          const vodCats = await applyXtreamCatOverrides(raw, "movie");
+          const v = await getVodVersion();
+          logger.info(`[player_api] get_vod_categories — version=${v} count=${vodCats.length}`);
+          return h.response(vodCats.map((c: any) => ({ ...c, category_id: addVer(c.category_id, v) })));
         }
 
         if (action === "get_vod_streams") {
-          const { category_id, search } = request.query as Record<string, string>;
+          const { category_id: rawCatId, search } = request.query as Record<string, string>;
+          const category_id = rawCatId ? stripVer(rawCatId) : rawCatId;
+          logger.info(`[player_api] get_vod_streams request — raw_category_id=${rawCatId ?? "(none)"} stripped=${category_id ?? "(none)"} search=${search ?? "(none)"}`);
           const getVodCache = (catId: string) =>
             xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
           let rawResult: any[];
@@ -902,7 +964,7 @@ export const xtreamRoutes: ServerRoute[] = [
             rawResult = all;
             logger.info(`[player_api] get_vod_streams (all): ${all.length} movies`);
           } else if (category_id.startsWith("vcat_")) {
-            return h.response(await applyVodOverrides([], category_id, getVodCache));
+            rawResult = [];
           } else {
             const cacheKey = `vod_streams_${category_id}`;
             const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
@@ -945,9 +1007,10 @@ export const xtreamRoutes: ServerRoute[] = [
             }
           }
 
-          return h.response(
-            await applyVodOverrides(rawResult, category_id ?? null, getVodCache),
-          );
+          const vodOverridden = await applyVodOverrides(rawResult, category_id ?? null, getVodCache);
+          const vv = await getVodVersion();
+          const finalResult = vodOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vv) }));
+          return h.response(finalResult);
         }
 
         if (action === "get_vod_info") {
@@ -1009,11 +1072,14 @@ export const xtreamRoutes: ServerRoute[] = [
               }));
             await xtreamCache.set("series_cats", raw);
           }
-          return h.response(await applyXtreamCatOverrides(raw, "series"));
+          const seriesCats = await applyXtreamCatOverrides(raw, "series");
+          const vs = await getVodVersion();
+          return h.response(seriesCats.map((c: any) => ({ ...c, category_id: addVer(c.category_id, vs) })));
         }
 
         if (action === "get_series") {
-          const { category_id, search } = request.query as Record<string, string>;
+          const { category_id: rawSeriesCatId, search } = request.query as Record<string, string>;
+          const category_id = rawSeriesCatId ? stripVer(rawSeriesCatId) : rawSeriesCatId;
           const getSeriesCache = (catId: string) =>
             xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
           let rawResult: any[];
@@ -1044,7 +1110,7 @@ export const xtreamRoutes: ServerRoute[] = [
             rawResult = all;
             logger.info(`[player_api] get_series (all): ${all.length} series`);
           } else if (category_id.startsWith("vcat_")) {
-            return h.response(await applySeriesOverrides([], category_id, getSeriesCache));
+            rawResult = [];
           } else {
             const cacheKey = `series_list_${category_id}`;
             const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
@@ -1101,8 +1167,10 @@ export const xtreamRoutes: ServerRoute[] = [
             }
           }
 
+          const seriesOverridden = await applySeriesOverrides(rawResult, category_id ?? null, getSeriesCache);
+          const vs = await getVodVersion();
           return h.response(
-            await applySeriesOverrides(rawResult, category_id ?? null, getSeriesCache),
+            seriesOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vs) })),
           );
         }
 

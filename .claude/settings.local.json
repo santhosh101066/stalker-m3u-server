@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(diff \"F:/Projects/stalker-m3u-working/src/utils/storage.ts\" \"F:/Projects/stalker-m3u-server/src/utils/storage.ts\")",
+      "Read(//f/Projects/stalker-m3u-working/src/utils/**)",
+      "Read(//f/Projects/stalker-m3u-working/src/routes/**)",
+      "Bash(cd \"F:/Projects/stalker-m3u-working\" && find src/utils -name \"*.ts\" | head -20)",
+      "Read(//f/Projects/stalker-m3u-working/**)"
+    ]
+  }
+}

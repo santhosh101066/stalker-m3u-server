@@ -2,6 +2,7 @@ import { Channel } from "../models/Channel";
 import { Genre, GenreType } from "../models/Genre";
 import { EpgCache } from "../models/EpgCache";
 import { Op } from "sequelize";
+import { gzipSync, gunzipSync } from "zlib";
 
 export async function writeJSON(filename: string, data: any) {
   try {
@@ -188,9 +189,10 @@ export async function writeEpgCache(
       await EpgCache.destroy({ where: { profileId } });
     }
 
+    const compressed = gzipSync(JSON.stringify(cacheData.data)).toString("base64");
     await EpgCache.create({
       timestamp: cacheData.timestamp,
-      data: JSON.stringify(cacheData.data),
+      data: compressed,
       profileId: profileId !== undefined ? profileId : null,
     });
   } catch (error) {
@@ -208,10 +210,13 @@ export async function readEpgCache(profileId?: number): Promise<any | null> {
 
     if (!cache) return null;
 
-    return {
-      timestamp: cache.timestamp,
-      data: JSON.parse(cache.data),
-    };
+    let parsed: any;
+    try {
+      parsed = JSON.parse(gunzipSync(Buffer.from(cache.data, "base64")).toString());
+    } catch {
+      parsed = JSON.parse(cache.data);
+    }
+    return { timestamp: cache.timestamp, data: parsed };
   } catch (error) {
     console.error("Error reading EPG cache from database:", error);
     return null;

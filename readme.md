@@ -57,6 +57,8 @@ Key environment variables:
 | `STALKER_HOST` | — | Portal hostname |
 | `STALKER_MAC` | — | Device MAC address |
 | `SERIES_FLAG` | `is_series` | Field name on VOD items that marks series (`1` = series) |
+| `STRM_MOVIES_PATH` | — | Directory to write movie `.strm` files (Jellyfin/Emby) |
+| `STRM_SERIES_PATH` | — | Directory to write series `.strm` files (Jellyfin/Emby) |
 
 > If your portal uses a different field than `is_series` to distinguish movies from series, set `SERIES_FLAG` to match.
 
@@ -98,6 +100,48 @@ warmSeriesInfoCache (independent)
 ```
 
 Use `POST /api/v2/catchup-scan` to force a full page scan (e.g. after a long offline period).
+
+After each warm cycle, `.strm` files are regenerated if `STRM_MOVIES_PATH` / `STRM_SERIES_PATH` are set.
+
+---
+
+## Jellyfin / Emby (.strm Files)
+
+Set `STRM_MOVIES_PATH` and/or `STRM_SERIES_PATH` to a directory Jellyfin/Emby can scan. On every cache warm cycle the server writes one `.strm` file per movie/episode containing the stream URL. Files are only written when the URL changes.
+
+**Folder layout — movies:**
+```
+<STRM_MOVIES_PATH>/
+  Movie Title (2023)/
+    Movie Title (2023).strm
+```
+
+**Folder layout — series:**
+```
+<STRM_SERIES_PATH>/
+  Show Name (2021)/
+    Season 01/
+      Show Name (2021) S01E01 - Episode Title.strm
+```
+
+Duplicate folders that differ only by variant tags (language, quality, source — e.g. "Hindi", "4K", "WEBRip") are automatically merged into the cleanest folder name, with the tag appended to each file's stem.
+
+Trigger a manual regeneration from the Content Manager UI or via `POST /api/admin/strm/generate`.
+
+---
+
+## Content Manager
+
+Open `http://your-server-ip:3000/contentmanager` for a browser-based admin panel to customise how content appears to players.
+
+**What you can do:**
+- **Hide** categories or individual items so they never appear in players
+- **Rename** categories and items with a display name (original name is preserved)
+- **Move** VOD/series items to a different category
+- **Reorder** categories and items with drag-friendly sort controls
+- **Create virtual categories** (genre groups not present on the portal)
+
+Changes are stored in the database and applied transparently to all Xtream, M3U, and browser API responses without touching the cache.
 
 ---
 
@@ -181,6 +225,23 @@ Use `POST /api/v2/catchup-scan` to force a full page scan (e.g. after a long off
 | `GET /api/v2/debug/epg?id=` | Raw EPG for channel |
 | `GET /api/v2/debug/vod-item?id=` | Raw portal item |
 | `GET /api/v2/debug/episode-fetch?seriesId=&seasonId=` | Episode fetch diagnostics |
+
+**Content Manager**
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /contentmanager` | Browser admin UI |
+| `GET /api/admin/genres?type=` | List categories with override state |
+| `POST /api/admin/genres/{type}` | Create a virtual category |
+| `PUT /api/admin/genres/{type}/{id}` | Update category override (rename / hide / sort) |
+| `PUT /api/admin/genres/{type}/reorder` | Bulk-set sort order for categories |
+| `DELETE /api/admin/genres/{type}/{id}` | Remove category override |
+| `DELETE /api/admin/genres/{type}/order` | Clear all custom sort order for a type |
+| `GET /api/admin/items?type=&category_id=` | List items with override state |
+| `PUT /api/admin/items/{type}/{id}` | Update item override (rename / hide / move) |
+| `PUT /api/admin/items/{type}/{category_id}/reorder` | Bulk-set sort order for items |
+| `DELETE /api/admin/items/{type}/{id}` | Remove item override |
+| `POST /api/admin/strm/generate` | Trigger `.strm` file generation in background |
 
 ---
 

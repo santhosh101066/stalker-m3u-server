@@ -10,6 +10,8 @@ import { EpgCache } from "../models/EpgCache";
 import { XtreamCache } from "../models/XtreamCache";
 import { GenreOverride } from "../models/GenreOverride";
 import { ContentOverride } from "../models/ContentOverride";
+import { StrmMovie } from "../models/StrmMovie";
+import { StrmSeries } from "../models/StrmSeries";
 
 function resolveDatabasePath(): string {
   const envPath = process.env.SQLITE_DB_PATH;
@@ -40,7 +42,7 @@ if (!fs.existsSync(databaseDir)) {
 export const sequelize = new Sequelize({
   dialect: "sqlite",
   storage: databasePath,
-  models: [Token, SystemConfig, ConfigProfile, Channel, Genre, EpgCache, XtreamCache, GenreOverride, ContentOverride],
+  models: [Token, SystemConfig, ConfigProfile, Channel, Genre, EpgCache, XtreamCache, GenreOverride, ContentOverride, StrmMovie, StrmSeries],
   logging: false,
 });
 
