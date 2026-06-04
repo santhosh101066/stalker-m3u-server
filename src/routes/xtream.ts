@@ -72,8 +72,10 @@ export async function bumpVodVersion(): Promise<void> {
   logger.info(`[Xtream] VOD category version set to ${ts}`);
 }
 
+const vodVersioningEnabled = process.env.VOD_CATEGORY_VERSIONING === "true";
+
 function addVer(id: string | number, v: number): string {
-  return `${id}_v${v}`;
+  return vodVersioningEnabled ? `${id}_v${v}` : String(id);
 }
 
 function stripVer(id: string): string {
@@ -1010,6 +1012,8 @@ export const xtreamRoutes: ServerRoute[] = [
           const vodOverridden = await applyVodOverrides(rawResult, category_id ?? null, getVodCache);
           const vv = await getVodVersion();
           const finalResult = vodOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vv) }));
+          const cat7Sample = finalResult.filter((i: any) => i.category_id === addVer("7", vv)).slice(0, 5);
+          if (cat7Sample.length > 0) logger.info(`[player_api] cat7 top5: ${cat7Sample.map((i: any) => `${i.name}(added=${i.added})`).join(", ")}`);
           return h.response(finalResult);
         }
 

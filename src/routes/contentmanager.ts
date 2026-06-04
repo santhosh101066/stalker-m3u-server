@@ -6,6 +6,7 @@ import { readGenres, readChannels } from "@/utils/storage";
 import { xtreamCache } from "@/routes/xtream";
 import { genreKey, contentKey } from "@/utils/overrides";
 import { invalidateVodCache } from "@/utils/getM3uUrls";
+import { bumpVodVersion } from "@/routes/xtream";
 import { GenreType } from "@/models/Genre";
 import { generateStrmFiles } from "@/utils/strmGenerator";
 
@@ -859,6 +860,7 @@ export const adminRoutes: ServerRoute[] = [
         }
       }
       invalidateVodCache();
+      if (type !== "channel") await bumpVodVersion();
       return h.response({ success: true });
     },
   },
@@ -1098,6 +1100,7 @@ export const adminRoutes: ServerRoute[] = [
           }
         }
       }
+      if (type !== "channel") await bumpVodVersion();
       return h.response({ success: true });
     },
   },

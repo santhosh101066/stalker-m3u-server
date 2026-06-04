@@ -6,3 +6,5 @@ dist
 *.env
 stalker-m3u-server.env
 compose.override.yml
+database.sqlite
+database.db
