@@ -79,7 +79,7 @@ Configure via the browser UI at `http://localhost:3000` — set provider type to
 | `ADMIN_PASSWORD` | `admin` | Content Manager password |
 | `PROXY_SECRET` | — | HMAC secret for signed proxy URLs (required in production) |
 | `JWT_SECRET` | — | JWT secret for API tokens |
-| `SERIES_FLAG` | `is_series` | Field that marks series items on mixed Xtream portals |
+| `SERIES_FLAG` | `is_series` | Field that marks series items on mixed portals where VOD and series share the same endpoint |
 | `VOD_CATEGORY_VERSIONING` | `false` | Set `true` to enable category version suffixes (free player trick) |
 | `STRM_MOVIES_PATH` | — | Output directory for movie `.strm` files |
 | `STRM_SERIES_PATH` | — | Output directory for series `.strm` files |

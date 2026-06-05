@@ -53,7 +53,7 @@
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SERIES_FLAG` | `is_series` | Field name that marks series items on mixed Xtream portals (value `1` = series) |
+| `SERIES_FLAG` | `is_series` | Field name that marks series items on mixed portals where VOD and series share the same endpoint (value `1` = series) |
 | `VOD_CATEGORY_VERSIONING` | `false` | Set `true` to append version suffix to category IDs in Xtream responses |
 | `STRM_MOVIES_PATH` | — | Directory to write movie `.strm` files for Jellyfin/Emby |
 | `STRM_SERIES_PATH` | — | Directory to write series `.strm` files for Jellyfin/Emby |
@@ -94,7 +94,7 @@ Switching the active profile reinitializes the provider, stops the Stalker watch
 
 ## Portal Type Auto-Detection
 
-Two Xtream portal layouts are supported and detected automatically on first series category warm:
+Two portal layouts are supported and detected automatically on first series category warm:
 
 **Type 1 — Mixed portal**
 - Movies and series share the same VOD endpoint

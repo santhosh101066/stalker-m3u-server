@@ -391,7 +391,7 @@ export const stalkerV2: ServerRoute[] = [
             try {
               const link = await serverManager.getProvider().getMovieLink({
                 series: item.series_number ?? "0",
-                id: item.id,
+                id: Number(item.id),
                 download: 0,
               });
               const freshCmd = link?.js?.cmd;

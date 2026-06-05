@@ -165,7 +165,7 @@ function toUnixAdded(added: any): string {
 
 function mapVodItem(m: any, num: number, categoryId: string | number): any {
   const added = toUnixAdded(m.added);
-  if (m.cmd) xtreamCache.set(`vod_cmd_${m.id}`, m.cmd);
+  if (m.cmd) xtreamCache.set(`vod_cmd_${m.id}`, m.cmd).catch(() => {});
   xtreamCache.set(`vod_info_${m.id}`, {
     info: {
       name:          m.name,
@@ -190,7 +190,7 @@ function mapVodItem(m: any, num: number, categoryId: string | number): any {
       custom_sid:          "",
       direct_source:       "",
     },
-  });
+  }).catch(() => {});
   return {
     num,
     name:                m.name,
@@ -378,10 +378,10 @@ export async function warmSeriesInfoCache(): Promise<void> {
               movieId:   seriesId,
               seasonId:  seasonIdInt,
               seriesNum: epNum,
-            });
+            }).catch(() => {});
             totalEpInfo++;
             if (ep.cmd) {
-              xtreamCache.set(`ep_cmd_${ep.id}`, { cmd: ep.cmd, series_num: epNum });
+              xtreamCache.set(`ep_cmd_${ep.id}`, { cmd: ep.cmd, series_num: epNum }).catch(() => {});
             }
             return {
               id:                  ep.id,
