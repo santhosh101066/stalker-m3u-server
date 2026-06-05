@@ -220,7 +220,7 @@ export class XtreamClient implements IProvider {
     };
   }
 
-  async getChannelLink(cmd: string): Promise<Data<Program>> {
+  async getChannelLink(cmd: string, startTime?: number, endTime?: number): Promise<Data<Program>> {
     return {
       js: {
         id: "0",
@@ -230,7 +230,7 @@ export class XtreamClient implements IProvider {
     };
   }
 
-  async getEPG(channelId: string): Promise<ArrayData<EPG_List>> {
+  async getEPG(channelId: string, date?: string): Promise<ArrayData<EPG_List>> {
     try {
       const data = await this.makeRequest({
         action: "get_short_epg",
