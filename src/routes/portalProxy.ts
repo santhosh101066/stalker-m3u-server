@@ -1,6 +1,7 @@
 import { ServerRoute } from "@hapi/hapi";
 import http from "http";
 import https from "https";
+import { initialConfig } from "@/config/server";
 
 export const portalProxy: ServerRoute[] = [
   {
@@ -16,14 +17,19 @@ export const portalProxy: ServerRoute[] = [
       const client = decodedUrl.startsWith("https") ? https : http;
 
       return new Promise((resolve, reject) => {
+        const headers: Record<string, string> = {
+          "Accept-Encoding": "gzip, deflate, br",
+          Accept: "*/*",
+          Connection: "keep-alive",
+        };
+        if (initialConfig.providerType === "xtream") {
+          headers["User-Agent"] = "VLC/3.0.16 LibVLC/3.0.16";
+        }
+
         const upstreamReq = client.get(
           decodedUrl,
           {
-            headers: {
-              "Accept-Encoding": "gzip, deflate, br",
-              Accept: "*/*",
-              Connection: "keep-alive",
-            },
+            headers,
           },
           (upstreamRes) => {
             const response = h.response(upstreamRes);

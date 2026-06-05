@@ -25,6 +25,18 @@ const getActiveProfileId = async () => {
   return activeProfile?.id;
 };
 
+const mapChannel = (channel: any) => {
+  let cmdUrl = channel.cmd;
+  if (initialConfig.providerType === "stalker") {
+    cmdUrl = `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`;
+  }
+  return {
+    ...channel,
+    cmd: cmdUrl,
+    isPortal: initialConfig.providerType === "stalker",
+  };
+};
+
 export const stalkerV2: ServerRoute[] = [
   {
     method: "GET",
@@ -122,9 +134,14 @@ export const stalkerV2: ServerRoute[] = [
             initialConfig.playCensored || String(channel.censored) !== "1",
         );
         await writeChannels(filteredChannels, profileId);
+        const mappedChannels = filteredChannels.map(mapChannel);
         const genres = await readGenres("channel", profileId);
-        return (filteredChannels ?? []).filter((channel) => {
-          const genre = genres.find((r) => r.id === channel.tv_genre_id);
+        // If no genres are loaded yet, skip genre filtering to avoid returning empty
+        if (genres.length === 0) {
+          return mappedChannels ?? [];
+        }
+        return (mappedChannels ?? []).filter((channel) => {
+          const genre = genres.find((r) => r.id === String(channel.tv_genre_id));
           return (
             genre &&
             (initialConfig.groups.length === 0 ||
@@ -150,7 +167,12 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = await readGenres("channel", profileId);
-        return (channels ?? [])
+        const mapped = (channels ?? []).map(mapChannel);
+        // If no genres loaded yet, skip genre filtering
+        if (genres.length === 0) {
+          return mapped.sort((a, b) => a.name.localeCompare(b.name));
+        }
+        return mapped
           .filter((channel) => {
             const genre = genres.find((r) => r.id === channel.tv_genre_id);
             return (
@@ -244,7 +266,7 @@ export const stalkerV2: ServerRoute[] = [
           sort,
         } = request.query;
 
-        if (category == 0) {
+        if (category == 0 && movieId == 0) {
           return h.redirect("/api/v2/movie-groups");
         }
 
@@ -307,7 +329,6 @@ export const stalkerV2: ServerRoute[] = [
           const cachedMovies = await xtreamCache.get<any[]>(`vod_streams_${category}`);
           if (cachedMovies && cachedMovies.length > 0) {
             const offset = (startApiPage - 1) * itemsPerApiPage;
-            // Cache items are in Xtream format (stream_id); browser uses item.id for navigation
             firstPageData = cachedMovies.slice(offset, offset + itemsPerApiPage).map((m: any) => ({
               ...m,
               id: String(m.stream_id),
@@ -401,11 +422,11 @@ export const stalkerV2: ServerRoute[] = [
             if (sort === "alphabetic") sortParam = "name";
 
             const res = isNativeSeries
-              ? await serverManager.getProvider().getSeries({ category, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam })
+              ? await serverManager.getProvider().getSeries({ category, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam, token, ...others })
               : await serverManager.getProvider().getMovies({ category, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam });
             return { page: pageNum, ...res.js };
-          } catch (err) {
-            console.error(`Failed to fetch page ${pageNum}: ${err}`);
+          } catch (err: any) {
+            console.error(`Failed to fetch page ${pageNum}:`, err.stack || err);
             return {
               page: pageNum,
               data: [],
@@ -442,7 +463,6 @@ export const stalkerV2: ServerRoute[] = [
           const cachedSeries = await xtreamCache.get<any[]>(`series_list_${category}`);
           if (cachedSeries && cachedSeries.length > 0) {
             const offset = (startApiPage - 1) * itemsPerApiPage;
-            // Cache items are in Xtream format (series_id); browser uses item.id for navigation
             const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage).map((s: any) => ({
               ...s,
               id: String(s.series_id),
@@ -463,7 +483,6 @@ export const stalkerV2: ServerRoute[] = [
         }
 
         const portalTotal = firstResult.total_items ?? 0;
-        // For native portals ratio is always 1; for VOD-mixed scale by series density
         const ratio = isNativeSeries ? 1 : (rawData.length > 0 ? firstPageData.length / rawData.length : 1);
         const actualTotalItems = Number(movieId) === 0
           ? Math.ceil(portalTotal * ratio)
@@ -493,13 +512,24 @@ export const stalkerV2: ServerRoute[] = [
     path: "/api/v2/movie-link",
     handler: async (request, h) => {
       try {
-        const { series = "", id = "", download = 0, category="0", token } = request.query;
-        const movieLink = await serverManager.getProvider().getMovieLink({
-          series,
-          id,
-          download,
-	  category,
-        });
+        const { series = "", id = "", download = 0, token, cmd } = request.query;
+        const isSeries = series && series !== "0" && series !== "false" && series !== "";
+        let movieLink;
+        if (isSeries) {
+          movieLink = await serverManager.getProvider().getSeriesLink({
+            series: series as string,
+            id: Number(id),
+            download: Number(download),
+            cmd: cmd as string,
+          });
+        } else {
+          movieLink = await serverManager.getProvider().getMovieLink({
+            series: series as string,
+            id: Number(id),
+            download: Number(download),
+            cmd: cmd as string,
+          });
+        }
         return movieLink;
       } catch (err) {
         console.error(err);

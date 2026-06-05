@@ -18,8 +18,8 @@ export interface IProvider {
 
   getChannelGroups(): Promise<Data<Genre[]>>;
   getChannels(): Promise<Data<Programs<Channel>>>;
-  getChannelLink(cmd: string): Promise<Data<Program>>;
-  getEPG(channelId: string): Promise<ArrayData<EPG_List>>;
+  getChannelLink(cmd: string, startTime?: number, endTime?: number): Promise<Data<Program>>;
+  getEPG(channelId: string, date?: string): Promise<ArrayData<EPG_List>>;
 
   getMoviesGroups(): Promise<Data<Genre[]>>;
   getMovies(params: MoviesApiParams): Promise<Data<Programs<Video>>>;
@@ -27,7 +27,7 @@ export interface IProvider {
     series: string;
     id: number;
     download: number;
-    category?: string;
+    cmd?: string;
   }): Promise<any>;
   getVodLinkByCmd(cmd: string, series?: number): Promise<any>;
 
@@ -37,5 +37,6 @@ export interface IProvider {
     series: string;
     id: number;
     download: number;
+    cmd?: string;
   }): Promise<any>;
 }

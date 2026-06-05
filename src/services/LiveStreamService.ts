@@ -1,5 +1,5 @@
 import { httpClient } from "@/utils/httpClient";
-import { appConfig } from "@/config/server";
+import { appConfig, initialConfig } from "@/config/server";
 import { serverManager } from "@/serverManager";
 import NodeCache from "node-cache";
 import { AxiosResponse } from "axios";
@@ -65,7 +65,11 @@ export class LiveStreamService {
       throw new Error("Stream Not Found");
     }
 
-    const res = await httpClient.get(masterUrl);
+    const headers = initialConfig.providerType === "xtream"
+      ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+      : {};
+
+    const res = await httpClient.get(masterUrl, { headers });
 
     if (res.status >= 400) {
       throw new Error(`Upstream Error ${res.status}`);
@@ -79,12 +83,14 @@ export class LiveStreamService {
 
     const lines = res.data.split("\n");
     const segments = new Map<number, string>();
+    let subpath: string | undefined;
 
     const modifiedLines = lines.map((line: string) => {
       if (line.startsWith("#") || line.trim() === "") {
         return line;
       }
       if (line.endsWith(".m3u8")) {
+        if (!subpath) subpath = line.trim();
         return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1&subpath=${encodeURIComponent(line)}`;
       }
 
@@ -95,7 +101,7 @@ export class LiveStreamService {
       return this.generateSignedUrl(resourceId);
     });
 
-    this.cache.set(cmd, { baseUrl, segments } as CacheRecord);
+    this.cache.set(cmd, { baseUrl, segments, subpath } as CacheRecord);
     return modifiedLines.join("\n");
   }
 
@@ -117,7 +123,10 @@ export class LiveStreamService {
       }
 
       const fetchPlaylist = async (url: string, isSubpath: boolean = false) => {
-        const res = await httpClient.get(url);
+        const headers = initialConfig.providerType === "xtream"
+          ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+          : {};
+        const res = await httpClient.get(url, { headers });
 
         if (!isSubpath && [301, 302, 403].includes(res.status)) {
           const newMasterUrl = await serverManager
@@ -126,7 +135,7 @@ export class LiveStreamService {
             .then((res) => res.js.cmd);
 
           if (newMasterUrl) {
-            const refreshedRes = await httpClient.get(newMasterUrl);
+            const refreshedRes = await httpClient.get(newMasterUrl, { headers });
 
             const finalUrl =
               refreshedRes.request?.res?.responseUrl || newMasterUrl;
@@ -173,7 +182,10 @@ export class LiveStreamService {
             .then((res) => res.js.cmd);
           if (!newMasterUrl) return { error: "Stream Not Found", code: 404 };
 
-          const refreshedRes = await httpClient.get(newMasterUrl);
+          const headers = initialConfig.providerType === "xtream"
+            ? { "User-Agent": "VLC/3.0.16 LibVLC/3.0.16" }
+            : {};
+          const refreshedRes = await httpClient.get(newMasterUrl, { headers });
 
           const finalUrl =
             refreshedRes.request?.res?.responseUrl || newMasterUrl;
@@ -329,7 +341,15 @@ export class LiveStreamService {
     let record: CacheRecord | undefined = this.cache.get(cmd);
 
     if (!record || !record.segments.has(seqId)) {
-      await this.populateCache(cmd);
+      if (!record) {
+        await this.populateCache(cmd);
+        record = this.cache.get(cmd);
+      }
+      const subpath = record?.subpath;
+      logger.info(
+        `[LiveStreamService] Segment ${seqId} missing in cache for ${cmd}. Refreshing playlist (subpath=${subpath})...`,
+      );
+      await this.getPlaylist(cmd, subpath ? "1" : undefined, subpath);
       record = this.cache.get(cmd);
       if (!record || !record.segments.has(seqId)) {
         throw new Error("Segment not found");
@@ -348,7 +368,8 @@ export class LiveStreamService {
         ...headers,
         host: undefined,
       },
-    });
+      skipRetry: true,
+    } as any);
   }
 }
 

@@ -1,13 +1,14 @@
 import { ServerRoute } from "@hapi/hapi";
 import { Channel } from "@/models/Channel";
 import { XtreamCache } from "@/models/XtreamCache";
+import { ConfigProfile } from "@/models/ConfigProfile";
+import { liveStreamService } from "@/services/LiveStreamService";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
 import { initialConfig, seriesFlag } from "@/config/server";
 import { readGenres, readChannels, upsertGenre, deleteGenre } from "@/utils/storage";
-import { cmdPlayerV2 } from "@/utils/cmdPlayer";
-import { stalkerApi } from "@/utils/stalker";
 import { getEpgCache } from "@/utils/epg";
+import { handleProxyStream } from "./proxy";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -1328,7 +1329,16 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/live/{username}/{password}/{streamId}.m3u8",
     handler: async (request, h) => {
       const { streamId } = request.params;
-      let channel = await Channel.findByPk(streamId);
+      const { proxy: proxyParam } = request.query as { proxy?: string };
+      const activeProfile = await ConfigProfile.findOne({
+        where: { isActive: true },
+      });
+      const profileId = activeProfile ? activeProfile.id : 1;
+      let channel = await Channel.findOne({
+        where: {
+          id: [streamId, `${profileId}_${streamId}`],
+        },
+      });
       if (!channel) {
         const { Op } = await import("sequelize");
         channel = await Channel.findOne({ where: { id: { [Op.like]: `%_${streamId}` } } });
@@ -1337,15 +1347,31 @@ export const xtreamRoutes: ServerRoute[] = [
         logger.error(`[Live] Channel not found for streamId=${streamId}`);
         return h.response("Channel not found").code(404);
       }
-      try {
-        stalkerApi.setActiveChannel(streamId);
-        const cdnUrl = await cmdPlayerV2(channel.cmd);
-        if (!cdnUrl) return h.response("Stream not found").code(404);
-        logger.info(`[Xtream Live] ${streamId} → ${cdnUrl}`);
-        return h.redirect(cdnUrl).code(302);
-      } catch (err: any) {
-        logger.error(`[Xtream Live] ${streamId} error: ${err.message}`);
-        return h.response({ error: err.message }).code(500);
+
+      const useProxy = initialConfig.proxy && proxyParam !== "0";
+
+      if (useProxy) {
+        const result = await liveStreamService.getPlaylist(channel.cmd, undefined);
+        if (typeof result === "string") {
+          return h.response(result).type("application/vnd.apple.mpegurl");
+        } else {
+          return h.response({ error: result.error }).code(result.code);
+        }
+      } else {
+        try {
+          const redirectedUrl = await serverManager
+            .getProvider()
+            .getChannelLink(channel.cmd)
+            .then((res) => res.js.cmd);
+          if (redirectedUrl) {
+            return h.redirect(redirectedUrl).code(302);
+          }
+          return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
+        } catch (err: any) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error(`Non-proxy error: ${message}`);
+          return h.response({ error: "Stream fetch failed" }).code(500);
+        }
       }
     },
   },
@@ -1356,58 +1382,49 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/live/{username}/{password}/{streamId}.ts",
     handler: async (request, h) => {
       const { streamId } = request.params;
-      logger.info(`[Xtream Live .ts] ${streamId} requested by ${request.info.remoteAddress}`);
-      let channel = await Channel.findByPk(streamId);
+      const { proxy: proxyParam } = request.query as { proxy?: string };
+      const activeProfile = await ConfigProfile.findOne({
+        where: { isActive: true },
+      });
+      const profileId = activeProfile ? activeProfile.id : 1;
+      let channel = await Channel.findOne({
+        where: {
+          id: [streamId, `${profileId}_${streamId}`],
+        },
+      });
       if (!channel) {
         const { Op } = await import("sequelize");
         channel = await Channel.findOne({ where: { id: { [Op.like]: `%_${streamId}` } } });
       }
       if (!channel) return h.response("Channel not found").code(404);
-      try {
-        stalkerApi.setActiveChannel(streamId);
-        const cdnUrl = await cmdPlayerV2(channel.cmd);
-        if (!cdnUrl) return h.response("Stream not found").code(404);
-        logger.info(`[Xtream Live .ts] ${streamId} → resolving variant from ${cdnUrl}`);
 
-        // Fetch master → variant → stream raw TS bytes to client
+      const useProxy = initialConfig.proxy && proxyParam !== "0";
+
+      if (useProxy) {
         try {
-          const { httpClient } = await import("@/utils/httpClient");
-          const { startHlsTsProxy } = await import("@/utils/hlsTsProxy");
-
-          const masterRes = await httpClient.get<string>(cdnUrl, { responseType: "text" });
-          const variantMatch = (masterRes.data || "").match(/^[^#\n\r].*$/m);
-          if (variantMatch) {
-            const variantUrl = new URL(variantMatch[0].trim(), cdnUrl).href;
-            logger.info(`[Xtream Live .ts] ${streamId} → TS proxy → ${variantUrl}`);
-
-            const refreshVariantUrl = async (): Promise<string> => {
-              const newCdnUrl = await cmdPlayerV2(channel!.cmd);
-              if (!newCdnUrl) throw new Error("Could not refresh CDN URL");
-              const newMaster = await httpClient.get<string>(newCdnUrl, { responseType: "text" });
-              const match = (newMaster.data || "").match(/^[^#\n\r].*$/m);
-              if (!match) throw new Error("No variant in refreshed master");
-              return new URL(match[0].trim(), newCdnUrl).href;
-            };
-
-            const tsStream = startHlsTsProxy(variantUrl, refreshVariantUrl);
-            request.raw.req.on("close", () => tsStream.destroy());
-
-            return h.response(tsStream).type("video/mp2t");
-          }
-        } catch (fetchErr: any) {
-          logger.warn(`[Xtream Live .ts] ${streamId} TS proxy setup failed, falling back: ${fetchErr.message}`);
+          return await handleProxyStream(request, h, channel.cmd);
+        } catch (err: any) {
+          logger.error(`Error proxying live TS stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
         }
+      }
 
-        // Fallback: redirect directly to master playlist
-        logger.info(`[Xtream Live .ts] ${streamId} → direct → ${cdnUrl}`);
-        return h.redirect(cdnUrl).code(302);
+      // Non-proxy path: get the real CDN URL from the provider and redirect
+      try {
+        const redirectedUrl = await serverManager
+          .getProvider()
+          .getChannelLink(channel.cmd)
+          .then((res) => res.js.cmd);
+        if (redirectedUrl) {
+          return h.redirect(redirectedUrl).code(302);
+        }
+        return h.response({ error: "Unable to fetch stream" }).code(400);
       } catch (err: any) {
-        logger.error(`[Xtream Live .ts] ${streamId} error: ${err.message}`);
-        return h.response({ error: err.message }).code(500);
+        logger.error(`[Xtream Live .ts] ${streamId} non-proxy error: ${err.message}`);
+        return h.response({ error: "Stream fetch failed" }).code(500);
       }
     },
   },
-
   // ── Live stream (no prefix, no extension) — some TV players use this format ─
   {
     method: "GET",
@@ -1415,6 +1432,44 @@ export const xtreamRoutes: ServerRoute[] = [
     handler: async (request, h) => {
       const { streamId, username, password } = request.params;
       return h.redirect(`/live/${username}/${password}/${streamId}.ts`).code(302);
+    },
+  },
+  {
+    method: "GET",
+    path: "/movie/{username}/{password}/{streamId}.{extension}",
+    handler: async (request, h) => {
+      const { streamId, extension } = request.params;
+      const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${initialConfig.username}/${initialConfig.password}/${streamId}.${extension}`;
+
+      if (initialConfig.proxy) {
+        try {
+          return await handleProxyStream(request, h, upstreamUrl);
+        } catch (err: any) {
+          logger.error(`Error proxying movie stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
+        }
+      } else {
+        return h.redirect(upstreamUrl).code(302);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/series/{username}/{password}/{episodeId}.{extension}",
+    handler: async (request, h) => {
+      const { episodeId, extension } = request.params;
+      const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/series/${initialConfig.username}/${initialConfig.password}/${episodeId}.${extension}`;
+
+      if (initialConfig.proxy) {
+        try {
+          return await handleProxyStream(request, h, upstreamUrl);
+        } catch (err: any) {
+          logger.error(`Error proxying series stream: ${err.message || err}`);
+          return h.response({ error: "Stream proxy failed" }).code(502);
+        }
+      } else {
+        return h.redirect(upstreamUrl).code(302);
+      }
     },
   },
 ];

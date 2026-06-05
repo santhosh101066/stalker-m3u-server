@@ -2,6 +2,7 @@ import { ServerRoute, Request, ResponseToolkit } from "@hapi/hapi";
 import { httpClient } from "@/utils/httpClient";
 import http from "http";
 import https, { RequestOptions } from "https";
+import { initialConfig } from "@/config/server";
 
 function assertHttpUrl(raw: string) {
   const u = new URL(raw);
@@ -38,7 +39,10 @@ export async function handleProxyStream(
   const response = await httpClient.get(decodedUrl, {
     responseType: "stream",
     headers: requestHeaders,
-  });
+    timeout: 0,
+    validateStatus: () => true,
+    skipRetry: true,
+  } as any);
 
   const stream = response.data as http.IncomingMessage;
   const hapiResponse = h.response(stream).code(response.status);
@@ -115,7 +119,34 @@ export const proxy: ServerRoute[] = [
         const playlistUrl = assertHttpUrl(decodedUrl).href;
         console.log(`[/proxy] ${request.info.remoteAddress} → ${playlistUrl}`);
 
+        const u = new URL(playlistUrl);
+        const pathLower = u.pathname.toLowerCase();
+        const isBinaryExt = [
+          ".mp4",
+          ".mkv",
+          ".ts",
+          ".avi",
+          ".mov",
+          ".flv",
+          ".wmv",
+          ".m4v",
+          ".3gp",
+          ".mpg",
+          ".mpeg",
+          ".m2ts",
+          ".mp3",
+          ".aac",
+          ".m4a",
+        ].some((ext) => pathLower.endsWith(ext));
+
+        if (isBinaryExt) {
+          return await handleProxyStream(request, h, playlistUrl, referer);
+        }
+
         const headers: Record<string, string> = {};
+        if (initialConfig.providerType === "xtream") {
+          headers["User-Agent"] = "VLC/3.0.16 LibVLC/3.0.16";
+        }
         if (referer) headers["Referer"] = referer;
 
         try {
@@ -141,6 +172,7 @@ export const proxy: ServerRoute[] = [
         const resp = await httpClient.get<string>(playlistUrl, {
           responseType: "text",
           headers,
+          timeout: 15000,
         });
 
         if (resp.status < 200 || resp.status >= 300) {

@@ -101,4 +101,18 @@ export const configRoutes: ServerRoute[] = [
       }
     },
   },
+  {
+    method: "POST",
+    path: "/api/clear-cache",
+    handler: async (request, h) => {
+      if (!authCheck(request)) return h.response({ error: "Unauthorized" }).code(401);
+      try {
+        serverManager.getProvider().clearCache();
+        return { success: true, message: "Cache cleared successfully." };
+      } catch (error: any) {
+        console.error("Error clearing cache:", error);
+        return h.response({ success: false, error: error.message }).code(500);
+      }
+    },
+  },
 ];

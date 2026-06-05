@@ -39,6 +39,11 @@ export class XtreamAPI {
               action,
               ...params,
             },
+            headers: {
+              "User-Agent": "VLC/3.0.16 LibVLC/3.0.16",
+              Accept: "*/*",
+              "Accept-Encoding": "gzip, deflate, br",
+            },
             timeout: 30000,
           },
         );
@@ -65,6 +70,12 @@ export class XtreamAPI {
               username,
               password,
             },
+            headers: {
+              "User-Agent": "VLC/3.0.16 LibVLC/3.0.16",
+              Accept: "*/*",
+              "Accept-Encoding": "gzip, deflate, br",
+            },
+            timeout: 30000,
           },
         );
         return response.data;

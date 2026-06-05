@@ -33,3 +33,5 @@ token.json
 stalker-m3u-server.env
 stalker-m3u-server.yml
 compose.override.yml
+database.sqlite
+temp
