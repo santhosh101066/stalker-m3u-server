@@ -736,7 +736,7 @@ export class StalkerAPI implements IProvider {
     download: number;
     cmd?: string;
   }) {
-    const resolvedCmd = cmd || `/media/file_${id}.mpg`;
+    const resolvedCmd = cmd || (initialConfig.contextPath === "" ? String(id) : `/media/file_${id}.mpg`);
     const params = {
       type: "vod",
       action: "create_link",

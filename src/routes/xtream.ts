@@ -18,6 +18,8 @@ import { getEpgCache } from "@/utils/epg";
 import { fetchMovieMeta, fetchTVMeta, TmdbMeta } from "@/utils/tmdb";
 import { SystemConfig } from "@/models/SystemConfig";
 import { handleProxyStream } from "./proxy";
+import { stalkerApi } from "@/utils/stalker";
+import { cmdPlayerV2 } from "@/utils/cmdPlayer";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -803,6 +805,93 @@ export async function warmVodCache(): Promise<boolean> {
   return newContentFound;
 }
 
+async function handleStalkerVodStream(request: any, h: any) {
+  const { streamId: sid, episodeId } = request.params;
+  const streamId = sid ?? episodeId;
+  try {
+    const provider = serverManager.getProvider();
+    const data = await provider.getMovies({ category: "*", page: 1, movieId: parseInt(streamId) });
+    const items: any[] = data?.js?.data || [];
+    const playable = items
+      .filter((m: any) => {
+        const u = m.url || m.cmd;
+        return u && (String(u).startsWith("http") || String(u).startsWith("ffrt "));
+      })
+      .sort((a: any, b: any) => parseInt(b.quality || 0) - parseInt(a.quality || 0));
+    const item = playable[0];
+    if (!item) {
+      logger.error(`[VOD stream] ${streamId} no playable item found`);
+      return h.response({ error: "Stream not found" }).code(404);
+    }
+    const link = await provider.getMovieLink({ series: "0", id: parseInt(String(item.id)), download: 0 });
+    let url: string = link?.js?.cmd || (item.cmd || item.url) || "";
+    if (url.startsWith("ffrt ")) url = url.slice(5);
+    logger.info(`[VOD stream] ${streamId} portal_id=${item.id} → ${url}`);
+    const b64 = Buffer.from(url).toString("base64");
+    return h.redirect(`/api/proxy?url=${b64}`).code(302);
+  } catch (err: any) {
+    logger.error(`[VOD stream] ${err.message}`);
+    return h.response({ error: err.message }).code(500);
+  }
+}
+
+async function handleStalkerSeriesStream(request: any, h: any) {
+  const { streamId, episodeId } = request.params;
+  const id = streamId ?? episodeId;
+  try {
+    const provider = serverManager.getProvider();
+    let url: string | undefined;
+    const epInfo = await xtreamCache.get<{ movieId: number; seasonId: number; seriesNum: number }>(`ep_info_${id}`);
+    if (epInfo) {
+      const epData = await provider.getMovies({
+        category: "*",
+        page:     1,
+        movieId:  epInfo.movieId,
+        seasonId: epInfo.seasonId,
+        episodeId: parseInt(id),
+      });
+      const epItem = (epData?.js?.data || []).find((e: any) => String(e.id) === id)
+        || epData?.js?.data?.[0];
+      if (epItem) {
+        const seriesNum = epItem.series_number ?? epInfo.seriesNum;
+        const link = await provider.getMovieLink({
+          series:   String(seriesNum),
+          id:       parseInt(String(epItem.id)),
+          download: 0,
+        });
+        url = link?.js?.cmd;
+        if (url?.startsWith("ffrt ")) url = url.slice(5);
+        logger.info(`[Series stream] ep ${id} (s=${seriesNum}) → ${url || "EMPTY"}`);
+      }
+    }
+
+    // Fallback: getMovieLink with cached series number
+    if (!url) {
+      const epCache = await xtreamCache.get<{ cmd: string; series_num: number }>(`ep_cmd_${id}`);
+      const seriesNum = epInfo?.seriesNum ?? epCache?.series_num ?? 0;
+      if (epCache?.cmd) {
+        const raw = epCache.cmd.startsWith("ffrt ") ? epCache.cmd.slice(5) : epCache.cmd;
+        const resolved = await provider.getVodLinkByCmd(raw, seriesNum);
+        url = resolved?.js?.cmd;
+        if (url?.startsWith("ffrt ")) url = url.slice(5);
+      }
+      if (!url) {
+        const link = await provider.getMovieLink({ series: String(seriesNum), id: parseInt(id), download: 0 });
+        url = link?.js?.cmd;
+        if (url?.startsWith("ffrt ")) url = url.slice(5);
+        logger.info(`[Series stream] ep ${id} fallback getMovieLink(series=${seriesNum}) → ${url || "EMPTY"}`);
+      }
+    }
+    if (!url) return h.response({ error: "Episode not found" }).code(404);
+    logger.info(`[Series stream] ep ${id} → ${url}`);
+    const b64 = Buffer.from(url).toString("base64");
+    return h.redirect(`/api/proxy?url=${b64}`).code(302);
+  } catch (err: any) {
+    logger.error(`[Series stream] ${err.message}`);
+    return h.response({ error: err.message }).code(500);
+  }
+}
+
 export const xtreamRoutes: ServerRoute[] = [
 
   {
@@ -1013,8 +1102,6 @@ export const xtreamRoutes: ServerRoute[] = [
           const vodOverridden = await applyVodOverrides(rawResult, category_id ?? null, getVodCache);
           const vv = await getVodVersion();
           const finalResult = vodOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vv) }));
-          const cat7Sample = finalResult.filter((i: any) => i.category_id === addVer("7", vv)).slice(0, 5);
-          if (cat7Sample.length > 0) logger.info(`[player_api] cat7 top5: ${cat7Sample.map((i: any) => `${i.name}(added=${i.added})`).join(", ")}`);
           return h.response(finalResult);
         }
 
@@ -1384,106 +1471,14 @@ export const xtreamRoutes: ServerRoute[] = [
   {
     method: "GET",
     path: "/movie/{username}/{password}/{streamId}.m3u8",
-    handler: async (request, h) => {
-      const { streamId } = request.params;
-      try {
-        const provider = serverManager.getProvider();
-
-        // Querying by movie_id returns media-file items with direct CDN URLs
-        // (video_id = streamId, id = portal media file id, url/cmd = CDN URL)
-        const data = await provider.getMovies({ category: "*", page: 1, movieId: parseInt(streamId) });
-        const items: any[] = data?.js?.data || [];
-
-        // Pick highest-quality item that has a direct HTTP URL
-        const playable = items
-          .filter((m: any) => {
-            const u = m.url || m.cmd;
-            return u && String(u).startsWith("http");
-          })
-          .sort((a: any, b: any) => parseInt(b.quality || 0) - parseInt(a.quality || 0));
-
-        const item = playable[0];
-        if (!item) {
-          logger.error(`[VOD stream] ${streamId} no playable item found`);
-          return h.response({ error: "Stream not found" }).code(404);
-        }
-
-        // Use create_link with portal item id — same as browser stalker flow
-        const link = await provider.getMovieLink({ series: "0", id: parseInt(String(item.id)), download: 0 });
-        let url: string = link?.js?.cmd || (item.cmd || item.url) || "";
-        if (url.startsWith("ffrt ")) url = url.slice(5);
-        logger.info(`[VOD stream] ${streamId} portal_id=${item.id} → ${url}`);
-        const b64 = Buffer.from(url).toString("base64");
-        return h.redirect(`/api/proxy?url=${b64}`).code(302);
-      } catch (err: any) {
-        logger.error(`[VOD stream] ${err.message}`);
-        return h.response({ error: err.message }).code(500);
-      }
-    },
+    handler: (request, h) => handleStalkerVodStream(request, h),
   },
 
   // ── Series stream ──────────────────────────────────────────────────────────
   {
     method: "GET",
     path: "/series/{username}/{password}/{streamId}.m3u8",
-    handler: async (request, h) => {
-      const { streamId } = request.params;
-      try {
-        const provider = serverManager.getProvider();
-        let url: string | undefined;
-
-        // Mirror browser: getMovies(movieId, seasonId, episodeId) → getMovieLink(series_number, id)
-        const epInfo = await xtreamCache.get<{ movieId: number; seasonId: number; seriesNum: number }>(`ep_info_${streamId}`);
-        if (epInfo) {
-          const epData = await provider.getMovies({
-            category: "*",
-            page:     1,
-            movieId:  epInfo.movieId,
-            seasonId: epInfo.seasonId,
-            episodeId: parseInt(streamId),
-          });
-          const epItem = (epData?.js?.data || []).find((e: any) => String(e.id) === streamId)
-            || epData?.js?.data?.[0];
-          if (epItem) {
-            const seriesNum = epItem.series_number ?? epInfo.seriesNum;
-            const link = await provider.getMovieLink({
-              series:   String(seriesNum),
-              id:       parseInt(String(epItem.id)),
-              download: 0,
-            });
-            url = link?.js?.cmd;
-            if (url?.startsWith("ffrt ")) url = url.slice(5);
-            logger.info(`[Series stream] ep ${streamId} (s=${seriesNum}) → ${url || "EMPTY"}`);
-          }
-        }
-
-        // Fallback: getMovieLink with cached series number
-        if (!url) {
-          const epCache = await xtreamCache.get<{ cmd: string; series_num: number }>(`ep_cmd_${streamId}`);
-          const seriesNum = epInfo?.seriesNum ?? epCache?.series_num ?? 0;
-          if (epCache?.cmd) {
-            const raw = epCache.cmd.startsWith("ffrt ") ? epCache.cmd.slice(5) : epCache.cmd;
-            const resolved = await provider.getVodLinkByCmd(raw, seriesNum);
-            url = resolved?.js?.cmd;
-            if (url?.startsWith("ffrt ")) url = url.slice(5);
-          }
-          if (!url) {
-            const link = await provider.getMovieLink({ series: String(seriesNum), id: parseInt(streamId), download: 0 });
-            url = link?.js?.cmd;
-            if (url?.startsWith("ffrt ")) url = url.slice(5);
-            logger.info(`[Series stream] ep ${streamId} fallback getMovieLink(series=${seriesNum}) → ${url || "EMPTY"}`);
-          }
-        }
-
-        if (!url) return h.response({ error: "Episode not found" }).code(404);
-        logger.info(`[Series stream] ep ${streamId} → ${url}`);
-        const b64 = Buffer.from(url).toString("base64");
-        return h.redirect(`/api/proxy?url=${b64}`).code(302);
-      } catch (err: any) {
-        logger.error(`[Series stream] ${err.message}`);
-        return h.response({ error: err.message }).code(500);
-      }
-    },
+    handler: (request, h) => handleStalkerSeriesStream(request, h),
   },
 
   // ── Live stream .m3u8 ──────────────────────────────────────────────────────
@@ -1561,19 +1556,49 @@ export const xtreamRoutes: ServerRoute[] = [
       }
       if (!channel) return h.response("Channel not found").code(404);
 
-      const useProxy = initialConfig.proxy && proxyParam !== "0";
-
-      if (useProxy) {
-        try {
-          return await handleProxyStream(request, h, channel.cmd);
-        } catch (err: any) {
-          logger.error(`Error proxying live TS stream: ${err.message || err}`);
-          return h.response({ error: "Stream proxy failed" }).code(502);
-        }
-      }
-
-      // Non-proxy path: get the real CDN URL from the provider and redirect
       try {
+        if (initialConfig.providerType === "stalker") {
+          stalkerApi.setActiveChannel(streamId);
+          const cdnUrl = await cmdPlayerV2(channel.cmd);
+          if (!cdnUrl) return h.response("Stream not found").code(404);
+          logger.info(`[Xtream Live .ts] ${streamId} → resolving variant from ${cdnUrl}`);
+
+          try {
+            const { httpClient } = await import("@/utils/httpClient");
+            const { startHlsTsProxy } = await import("@/utils/hlsTsProxy");
+
+            const masterRes = await httpClient.get<string>(cdnUrl, { responseType: "text" });
+            const variantMatch = (masterRes.data || "").match(/^[^#\n\r].*$/m);
+            if (variantMatch) {
+              const variantUrl = new URL(variantMatch[0].trim(), cdnUrl).href;
+              logger.info(`[Xtream Live .ts] ${streamId} → TS proxy → ${variantUrl}`);
+
+              const refreshVariantUrl = async (): Promise<string> => {
+                const newCdnUrl = await cmdPlayerV2(channel!.cmd);
+                if (!newCdnUrl) throw new Error("Could not refresh CDN URL");
+                const newMaster = await httpClient.get<string>(newCdnUrl, { responseType: "text" });
+                const match = (newMaster.data || "").match(/^[^#\n\r].*$/m);
+                if (!match) throw new Error("No variant in refreshed master");
+                return new URL(match[0].trim(), newCdnUrl).href;
+              };
+
+              const tsStream = startHlsTsProxy(variantUrl, refreshVariantUrl);
+              request.raw.req.on("close", () => tsStream.destroy());
+              return h.response(tsStream).type("video/mp2t");
+            }
+          } catch (fetchErr: any) {
+            logger.warn(`[Xtream Live .ts] ${streamId} TS proxy setup failed, falling back: ${fetchErr.message}`);
+          }
+
+          logger.info(`[Xtream Live .ts] ${streamId} → direct → ${cdnUrl}`);
+          return h.redirect(cdnUrl).code(302);
+        }
+
+        // Xtream provider path
+        const useProxy = initialConfig.proxy && proxyParam !== "0";
+        if (useProxy) {
+          return await handleProxyStream(request, h, channel.cmd);
+        }
         const redirectedUrl = await serverManager
           .getProvider()
           .getChannelLink(channel.cmd)
@@ -1583,7 +1608,7 @@ export const xtreamRoutes: ServerRoute[] = [
         }
         return h.response({ error: "Unable to fetch stream" }).code(400);
       } catch (err: any) {
-        logger.error(`[Xtream Live .ts] ${streamId} non-proxy error: ${err.message}`);
+        logger.error(`[Xtream Live .ts] ${streamId} error: ${err.message}`);
         return h.response({ error: "Stream fetch failed" }).code(500);
       }
     },
@@ -1602,8 +1627,10 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/movie/{username}/{password}/{streamId}.{extension}",
     handler: async (request, h) => {
       const { streamId, extension } = request.params;
+      if (initialConfig.providerType === "stalker") {
+        return handleStalkerVodStream(request, h);
+      }
       const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${initialConfig.username}/${initialConfig.password}/${streamId}.${extension}`;
-
       if (initialConfig.proxy) {
         try {
           return await handleProxyStream(request, h, upstreamUrl);
@@ -1611,9 +1638,8 @@ export const xtreamRoutes: ServerRoute[] = [
           logger.error(`Error proxying movie stream: ${err.message || err}`);
           return h.response({ error: "Stream proxy failed" }).code(502);
         }
-      } else {
-        return h.redirect(upstreamUrl).code(302);
       }
+      return h.redirect(upstreamUrl).code(302);
     },
   },
   {
@@ -1621,8 +1647,10 @@ export const xtreamRoutes: ServerRoute[] = [
     path: "/series/{username}/{password}/{episodeId}.{extension}",
     handler: async (request, h) => {
       const { episodeId, extension } = request.params;
+      if (initialConfig.providerType === "stalker") {
+        return handleStalkerSeriesStream(request, h);
+      }
       const upstreamUrl = `http://${initialConfig.hostname}:${initialConfig.port}/series/${initialConfig.username}/${initialConfig.password}/${episodeId}.${extension}`;
-
       if (initialConfig.proxy) {
         try {
           return await handleProxyStream(request, h, upstreamUrl);
@@ -1630,9 +1658,8 @@ export const xtreamRoutes: ServerRoute[] = [
           logger.error(`Error proxying series stream: ${err.message || err}`);
           return h.response({ error: "Stream proxy failed" }).code(502);
         }
-      } else {
-        return h.redirect(upstreamUrl).code(302);
       }
+      return h.redirect(upstreamUrl).code(302);
     },
   },
 ];
