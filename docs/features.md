@@ -5,23 +5,25 @@
 ## Table of Contents
 
 1. [Environment Variables](#environment-variables)
-2. [Portal Types & Auto-Detection](#portal-types--auto-detection)
-3. [Cache Warming](#cache-warming)
-4. [VOD Category Versioning](#vod-category-versioning)
-5. [Content Manager](#content-manager)
-6. [Override System](#override-system)
-7. [Jellyfin / .strm Integration](#jellyfin--strm-integration)
-8. [EPG Handling](#epg-handling)
-9. [Profiles](#profiles)
-10. [Live Stream Proxy & HLS](#live-stream-proxy--hls)
-11. [TMDB Integration](#tmdb-integration)
-12. [API Reference](#api-reference)
+2. [Provider Types](#provider-types)
+3. [Portal Type Auto-Detection](#portal-type-auto-detection)
+4. [Cache Warming](#cache-warming)
+5. [VOD Category Versioning](#vod-category-versioning)
+6. [Content Manager](#content-manager)
+7. [Override System](#override-system)
+8. [Jellyfin / .strm Integration](#jellyfin--strm-integration)
+9. [HLS Transcode Proxy](#hls-transcode-proxy)
+10. [EPG Handling](#epg-handling)
+11. [Profiles](#profiles)
+12. [Live Stream Proxy](#live-stream-proxy)
+13. [TMDB Integration](#tmdb-integration)
+14. [API Reference](#api-reference)
 
 ---
 
 ## Environment Variables
 
-### Portal
+### Portal (Stalker)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -31,6 +33,8 @@
 | `STALKER_PATH` | `stalker_portal` | Context path |
 | `STALKER_MAC` | `00:1A:79:00:00:00` | MAC address for STB emulation |
 | `STALKER_STB` | `MAG254` | STB type |
+
+> Xtream Codes credentials (host, username, password) are stored per-profile in the database and configured via the browser UI — not environment variables.
 
 ### Server
 
@@ -42,14 +46,14 @@
 | `ADMIN_PASSWORD` | `admin` | Content Manager password |
 | `PROXY_SECRET` | — | HMAC secret for signed proxy URLs — required in production |
 | `JWT_SECRET` | — | JWT secret for API tokens |
-| `TLS_CERT_PATH` | — | TLS certificate path (enables HTTPS) |
-| `TLS_KEY_PATH` | — | TLS key path (enables HTTPS) |
+| `TLS_CERT_PATH` | — | TLS certificate path (enables HTTPS on the server) |
+| `TLS_KEY_PATH` | — | TLS key path |
 
 ### Content
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SERIES_FLAG` | `is_series` | Field name that marks series items on mixed portals (value `1` = series) |
+| `SERIES_FLAG` | `is_series` | Field name that marks series items on mixed Xtream portals (value `1` = series) |
 | `VOD_CATEGORY_VERSIONING` | `false` | Set `true` to append version suffix to category IDs in Xtream responses |
 | `STRM_MOVIES_PATH` | — | Directory to write movie `.strm` files for Jellyfin/Emby |
 | `STRM_SERIES_PATH` | — | Directory to write series `.strm` files for Jellyfin/Emby |
@@ -60,26 +64,50 @@
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `API_TIMEOUT` | `5000` | HTTP request timeout (ms) |
-| `API_RETRIES` | `3` | Retry attempts on failed requests |
+| `API_RETRIES` | `3` | Retry attempts on failed requests (disabled for streams and aborted requests) |
 
 ---
 
-## Portal Types & Auto-Detection
+## Provider Types
 
-Two portal layouts are supported and detected automatically on first series warm:
+The server supports two backend provider types, switchable per-profile without restart.
+
+### Stalker Portal
+
+Connects to a Stalker Middleware portal using STB emulation (MAC address + token authentication). All portal API calls go through the Stalker `load.php` endpoint. The `stalkerApi` singleton manages token refresh, watchdog keep-alive, and request queuing.
+
+**Configuration:** `STALKER_HOST`, `STALKER_MAC`, and related env vars.
+
+### Xtream Codes API
+
+Connects to any Xtream Codes-compatible API (`player_api.php`). Credentials (host, port, username, password) are stored in the active `ConfigProfile` in the database and configured via the browser UI.
+
+**VLC User-Agent** is sent on all Xtream requests to maximize compatibility with portal-side access controls.
+
+**Stream URLs** for Xtream use `this.baseUrl` (the portal's own address) and detect the real container extension via `get_vod_info` / `get_series_info` before building the final URL — falling back to `.mp4` if unavailable.
+
+### Switching providers
+
+Switching the active profile reinitializes the provider, stops the Stalker watchdog, clears the in-memory cache, and broadcasts a config-change event via WebSocket — no restart required.
+
+---
+
+## Portal Type Auto-Detection
+
+Two Xtream portal layouts are supported and detected automatically on first series category warm:
 
 **Type 1 — Mixed portal**
 - Movies and series share the same VOD endpoint
 - Items with `{SERIES_FLAG} == 1` are treated as series
-- Single category list serves both movies and series
+- `SERIES_FLAG` defaults to `is_series`; override with the env var for portals using a different field name
 
 **Type 2 — Native series portal**
-- Separate `getSeries()` API for series
-- `getMovies()` returns only movies
+- Separate `get_series` / `get_series_categories` API for series
+- `get_vod_streams` returns only movies
 - Separate category lists for each content type
 - Detected and stored in cache as `portal_series_source = "native"`
 
-Detection is automatic. The result is cached in `XtreamCache` under `portal_series_source`. To force re-detection, clear the Xtream cache.
+Detection is automatic. The result is cached in `XtreamCache` under `portal_series_source`. To force re-detection, clear the Xtream cache or refresh series groups.
 
 ---
 
@@ -97,7 +125,7 @@ Content is cached in SQLite (`XtreamCache` table, 24-hour TTL) so the server nev
 4. Genres are upserted based on actual content found
 5. `cleanupGenres()` removes any genre entries with no cached content
 
-`warmSeriesInfoCache()` runs independently after:
+`warmSeriesInfoCache()` runs independently after the series warm:
 - Iterates every cached series and pre-fetches all seasons/episodes
 - 500ms throttle between series to avoid portal hammering
 - Stores episodes under `ep_info_{ep_id}` and `ep_cmd_{ep_id}`
@@ -135,13 +163,13 @@ When new content arrives or you reorder/move items in the Content Manager, `bump
 
 **Internally**, `stripVer()` removes the suffix before any cache lookup, so the bare ID is always used server-side.
 
-**When NOT to use this:** If your player has a premium APK with its own catchup/caching that bypasses your Xtream endpoints entirely, leave `VOD_CATEGORY_VERSIONING` unset. The player won't call your category endpoints anyway, so versioning won't help.
-
 Version bumps are triggered by:
 - New content found during a warm cycle
 - Category reorder (genres/reorder endpoint)
 - Item moved to a different category (items/reorder endpoint)
-- Server startup (`bumpVodVersion` called once on init)
+- Server startup
+
+**When NOT to use this:** If your player has a premium APK that bypasses Xtream category endpoints entirely, leave `VOD_CATEGORY_VERSIONING` unset.
 
 ---
 
@@ -168,11 +196,11 @@ Three tabs: **Live**, **VOD**, **Series**.
 |--------|-------------|
 | Rename | Override display name |
 | Hide | Exclude from all API responses |
-| Move | Reassign to a different category (VOD/Series only) |
+| Move | Reassign to a different category, including virtual ones (VOD/Series only) |
 | Reorder | Drag within category; persists `sort_order` |
 | Multi-select | Shift+click for range selection; all selected items get the same operation |
 
-All changes are stored in `GenreOverride` and `ContentOverride` tables and applied transparently to every Xtream, M3U, and browse API response — the portal cache is never touched.
+All changes are stored in `GenreOverride` and `ContentOverride` tables and applied transparently to every Xtream, M3U, and browse API response — the portal cache is never modified.
 
 ---
 
@@ -199,19 +227,23 @@ Two database tables power the override layer:
 | `item_type` | `movie`, `series`, or `channel` |
 | `display_name` | Renamed title |
 | `hidden` | Exclude from responses |
-| `target_category_id` | Category to move item into |
+| `target_category_id` | Category to move item into (supports virtual `vcat_*` IDs) |
 | `original_category_id` | Source category (saved for restore) |
 | `sort_order` | Custom position within category |
 
 ### Move semantics
 
-When an item is moved, `target_category_id` is set and `original_category_id` is saved. When fetching a category, items moved away are excluded and items moved in are included. Deleting a virtual category restores all items that were moved into it.
+When an item is moved, `target_category_id` is set and `original_category_id` is saved. When fetching a category, items moved away are excluded and items moved in are appended after applying sort order. Deleting a virtual category restores all items that were moved into it to their original categories.
+
+### Virtual categories
+
+Virtual categories have IDs prefixed `vcat_`. The Xtream response normalizes `vcat_*` → `*` before any portal API call, so the portal never sees the virtual ID. Items can be moved into virtual categories freely — they appear under that category in all API responses and are excluded from their original category.
 
 ---
 
 ## Jellyfin / .strm Integration
 
-Set `STRM_MOVIES_PATH` and/or `STRM_SERIES_PATH` to a directory Jellyfin/Emby can scan. On every cache warm the server generates `.strm` files pointing to stream URLs. Files are only written when the URL changes.
+Set `STRM_MOVIES_PATH` and/or `STRM_SERIES_PATH` to a directory Jellyfin/Emby can scan. On every cache warm the server generates `.strm` files pointing to stream URLs. Files are only written when the URL changes — existing paths with unchanged URLs are left untouched.
 
 ### Folder layout
 
@@ -239,7 +271,7 @@ Portals commonly list the same movie multiple times with variant tags (language,
 1. Groups by canonical title (stripped of variant tags)
 2. Picks the cleanest name as the primary folder
 3. Renames duplicates as `Title [Tag].strm` inside the same folder
-4. Removes now-empty secondary folders
+4. Removes now-empty secondary folders on regeneration
 
 Variant tag patterns detected:
 - **Quality:** 4K, UHD, FHD, HD, SD, 720p, 1080p, 2160p
@@ -251,23 +283,58 @@ Trigger manual regeneration: `POST /api/admin/strm/generate` or via the Content 
 
 ---
 
+## HLS Transcode Proxy
+
+An FFmpeg-based transcode proxy for VOD and series content. Useful for players that can't handle the portal's native stream format, need seeking in container formats that don't support it natively, or require specific audio track selection.
+
+**Requires FFmpeg** to be installed (included in the default Docker image).
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/media/info?url=` | Probe a URL — returns duration, audio tracks, subtitle tracks |
+| `GET /api/media/hls/master.m3u8?url=` | Master HLS playlist with all audio tracks |
+| `GET /api/media/hls/session/{sessionId}/{file}` | Individual media playlists and `.ts` segments |
+| `GET /api/media/subtitle?url=&index=` | Extract and serve a subtitle track |
+
+### How it works
+
+1. `GET /api/media/info` — FFprobe probes the URL and returns metadata (duration, audio/subtitle streams). Result cached for 6 hours.
+2. `GET /api/media/hls/master.m3u8` — builds a master playlist listing all audio tracks as `#EXT-X-MEDIA` groups. Each track gets its own `playlist_audio_N.m3u8`.
+3. Media playlists are VOD-type with timestamp-encoded segment URIs (`seg_video_0.ts?start=0.000`). Seeking is exact — the segment handler reads the `start` query param and passes `-ss` to FFmpeg.
+4. FFmpeg is spawned per session with a `SIGKILL` watchdog that fires after 60 seconds of inactivity.
+5. Parallel seek-restart races are guarded (`isRestarting` flag + debounce).
+
+### Session lifecycle
+
+- Sessions are stored in memory in `activeSessions`
+- A watchdog interval (every 10s) kills FFmpeg and deletes temp files for sessions idle > 60 seconds
+- Temp files are written to `temp/hls/{sessionId}/`
+
+---
+
 ## EPG Handling
 
-EPG data is fetched from the portal, cached in SQLite (`EpgCache` table), and served as XMLTV at `/epg.xml`.
+EPG data is fetched from the portal, cached in SQLite (`EpgCache` table, compressed with gzip), and served as XMLTV at `/epg.xml`.
 
 ### Fetch strategy
 
 - **On startup:** fetch immediately if cache is missing or stale (>12 hours)
-- **Background job:** checks every 30 minutes; only fetches if stale AND server has been idle for >2 minutes (avoids contention during active playback)
+- **Background job:** checks every 30 minutes; only fetches if stale AND server has been idle for >2 minutes
 - **On-demand:** `POST /api/v2/refresh-epg`
 
 ### Concurrency
 
 Channels are fetched 5 at a time with a yield between batches to avoid memory spikes on large channel lists.
 
+### Storage
+
+EPG XML is gzip-compressed before writing to SQLite, with transparent decompression on read and a fallback for legacy uncompressed entries.
+
 ### Title decoding
 
-Xtream portals Base64-encode EPG titles. The server decodes them automatically before caching.
+Xtream portals Base64-encode EPG titles. The server decodes them automatically — with fallback handling for both standard and URL-safe Base64 variants and non-Base64 plain-text titles.
 
 ---
 
@@ -276,29 +343,42 @@ Xtream portals Base64-encode EPG titles. The server decodes them automatically b
 Multiple portal configurations can be stored and switched without restarting the server.
 
 - Each profile has its own channels, genres, and EPG cache
-- Content overrides (GenreOverride, ContentOverride) are global — shared across all profiles
+- Content overrides (`GenreOverride`, `ContentOverride`) are **global** — shared across all profiles
 - Only one profile can be active at a time
-- Switching profiles reinitializes the provider and broadcasts a config-change event via WebSocket
+- Switching profiles stops the current provider, clears in-memory cache, reinitializes the provider with new credentials, and broadcasts a config-change event via WebSocket
 - Deleting a profile cascades to its channels, genres, and EPG cache
 
 **Profile API:** `GET/POST/PUT/DELETE /api/profiles` and `/api/profiles/{id}/activate`
 
 ---
 
-## Live Stream Proxy & HLS
+## Live Stream Proxy
 
-### Two-level HLS caching
+### Xtream live streams (`LiveStreamService`)
 
-1. **Master playlist** — resolved from portal command and cached for 30 seconds
+Two modes controlled per-request via `proxy=0` query param (default is proxy-on based on server config):
+
+**Proxy mode (default):**
+- `liveStreamService` fetches the master HLS playlist from the portal, rewrites segment URLs to signed `/player/{id}.ts` paths, and caches the segment map
+- Segments are served at `GET /player/{resourceId}.ts` (or handled by `liveStreamService.getSegment`)
+- VLC User-Agent is sent on all upstream HLS fetches
+- Cache miss on a segment triggers a playlist refresh using the stored subpath
+
+**Non-proxy mode:**
+- `serverManager.getProvider().getChannelLink(cmd)` resolves the real CDN URL
+- Client receives a `302` redirect directly to the stream
+
+### Stalker live streams (HLS caching)
+
+1. **Master playlist** — resolved from portal command via `cmdPlayerV2` and cached for 30 seconds
 2. **Segment map** — `#EXT-X-MEDIA-SEQUENCE` number → relative URL, stored per stream
+3. Segments served at `GET /player/{resourceId}.ts` with HMAC-signed URLs
+4. On 301/302/403, server auto-refreshes the master URL and updates the cached base URL
+5. Concurrent requests for the same stream share a single upstream fetch (pending-promise deduplication)
 
-Segments are served at `GET /player/{resourceId}.ts` with HMAC-signed URLs (`PROXY_SECRET`). Concurrent requests for the same stream share a single upstream fetch (pending-promise deduplication).
+### Catchup
 
-If the master playlist returns 301/302/403, the server auto-fetches a new master URL and updates the cache.
-
-### General proxy
-
-`GET /api/proxy/stream?url={base64url}&ref={base64ref}` — forwards Range headers (seeking), copies content headers, adds CORS headers. Referer can be set for servers that require it.
+`GET /live.m3u8?cmd=...&start_time=...&end_time=...` passes timestamps to `cmdPlayerV2`, which forwards them to the portal's catchup endpoint.
 
 ---
 
@@ -311,7 +391,7 @@ The server strips quality/format tags from titles before searching TMDB:
 Avatar 4K BluRay  →  search "Avatar"
 ```
 
-Returns `poster`, `backdrop`, and `overview` URLs. If TMDB is unavailable or the token is not set, the field is silently omitted — nothing breaks.
+Returns `poster`, `backdrop`, and `overview`. Enriched metadata is merged into Xtream `get_vod_info` and `get_series_info` responses. If TMDB is unavailable or the token is not set, the fields are silently omitted — nothing breaks.
 
 ---
 
@@ -322,10 +402,21 @@ Returns `poster`, `backdrop`, and `overview` URLs. If TMDB is unavailable or the
 | Endpoint | Actions |
 |----------|---------|
 | `GET /player_api.php` | `get_live_categories`, `get_live_streams`, `get_vod_categories`, `get_vod_streams`, `get_vod_info`, `get_series_categories`, `get_series`, `get_series_info`, `get_short_epg` |
-| `GET /live/{user}/{pass}/{id}.m3u8` | Live stream |
-| `GET /movie/{user}/{pass}/{id}.{ext}` | VOD stream |
-| `GET /series/{user}/{pass}/{sid}/{season}/{ep}.{ext}` | Episode stream |
+| `GET /live/{user}/{pass}/{id}.m3u8` | Live stream (HLS proxy or redirect) |
+| `GET /live/{user}/{pass}/{id}.ts` | Live stream (TS segment proxy or redirect) |
+| `GET /movie/{user}/{pass}/{id}.{ext}` | VOD stream (proxy) |
+| `GET /series/{user}/{pass}/{id}.{ext}` | Episode stream (proxy) |
 | `GET /xmltv.php` | EPG (XMLTV) |
+| `GET /{user}/{pass}/{id}` | Legacy redirect (for players omitting `/live/`) |
+
+### HLS Transcode
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/media/info?url=` | Probe URL — returns duration, audio tracks, subtitles |
+| `GET /api/media/hls/master.m3u8?url=` | Master HLS playlist (multi-audio) |
+| `GET /api/media/hls/session/{sessionId}/{file}` | Media playlist or `.ts` segment |
+| `GET /api/media/subtitle?url=&index=` | Subtitle track extraction |
 
 ### Browse (internal UI / custom players)
 
@@ -362,7 +453,8 @@ Returns `poster`, `backdrop`, and `overview` URLs. If TMDB is unavailable or the
 | `POST /api/v2/warm-xtream-series` | Warm series cache (incremental) |
 | `POST /api/v2/catchup-scan` | Full gap-fill scan |
 | `POST /api/v2/cleanup-genres` | Remove empty genre DB entries |
-| `DELETE /api/v2/clear-xtream-cache` | Wipe Xtream cache |
+| `DELETE /api/v2/clear-xtream-cache` | Wipe Xtream cache (triggers re-detection of portal type) |
+| `POST /api/clear-cache` | Clear active provider in-memory cache |
 
 ### Config & Auth
 
@@ -371,8 +463,8 @@ Returns `poster`, `backdrop`, and `overview` URLs. If TMDB is unavailable or the
 | `GET /api/config` | Get server config |
 | `POST /api/config` | Update server config |
 | `POST /api/auth/admin` | Admin login (returns JWT) |
-| `GET /api/v2/get-token` | Get API token |
-| `POST /api/v2/clear-tokens` | Revoke all tokens |
+| `GET /api/v2/get-token` | Get API token (Stalker only) |
+| `POST /api/v2/clear-tokens` | Revoke all tokens (Stalker only) |
 
 ### Profiles
 
