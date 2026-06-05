@@ -15,12 +15,14 @@ import { portalProxy } from "./routes/portalProxy";
 import { xtreamRoutes } from "./routes/xtream";
 import { hlsRoutes } from "./routes/hls";
 import { vodRoutes } from "./routes/vod";
+import { adminRoutes } from "./routes/contentmanager";
 import { socketService } from "./services/SocketService";
 
 import { initDB } from "./db";
 import { migrateToProfiles, loadActiveProfileFromDB } from "./config/server";
 import { loadPlaylistCache } from "./utils/getM3uUrls";
-import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres } from "./routes/xtream";
+import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres, bumpVodVersion } from "./routes/xtream";
+import { fetchAndCacheEpg, getEpgCache } from "./utils/epg";
 import { logger } from "./utils/logger";
 
 const init = async () => {
@@ -66,6 +68,7 @@ const init = async () => {
   server.route(xtreamRoutes);
   server.route(hlsRoutes);
   server.route(vodRoutes);
+  server.route(adminRoutes);
 
   server.route({
     method: "GET",
@@ -121,27 +124,39 @@ const init = async () => {
 
   const { backgroundJobService } =
     await import("./services/BackgroundJobService");
-  // backgroundJobService.start();
+  backgroundJobService.start();
 
   logger.info(`Server running at: ${server.info.uri}`);
 
+  await bumpVodVersion().catch((e) => logger.error(`[bumpVodVersion] ${e}`));
+
   // Warm xtream caches in background on startup, then cleanup stale genres
-  Promise.all([
-    warmVodCache().catch((e) => logger.error(`[warmVodCache] ${e}`)),
-    warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache] ${e}`)),
-  ]).then(() => cleanupGenres().catch((e) => logger.error(`[cleanupGenres] ${e}`)));
-  warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache] ${e}`));
+  (async () => {
+    await Promise.all([
+      warmVodCache().catch((e) => { logger.error(`[warmVodCache] ${e}`); return false; }),
+      warmSeriesCache().catch((e) => { logger.error(`[warmSeriesCache] ${e}`); return false; }),
+    ]);
+    await cleanupGenres().catch((e) => logger.error(`[cleanupGenres] ${e}`));
+    await warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache] ${e}`));
+  })();
+
+  // Fetch EPG on startup if cache is missing or stale
+  getEpgCache().then((cache) => {
+    if (!cache) {
+      fetchAndCacheEpg().catch((e) => logger.error(`[EPG startup] ${e}`));
+    }
+  }).catch((e) => logger.error(`[EPG startup check] ${e}`));
 
   // Re-warm all xtream caches every 24 hours
   setInterval(() => {
-    Promise.all([
-      warmVodCache().catch((e) => logger.error(`[warmVodCache interval] ${e}`)),
-      warmSeriesCache().catch((e) => logger.error(`[warmSeriesCache interval] ${e}`)),
-    ]).then(() => cleanupGenres().catch((e) => logger.error(`[cleanupGenres interval] ${e}`)));
-  }, 24 * 60 * 60 * 1000);
-
-  setInterval(() => {
-    warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache interval] ${e}`));
+    (async () => {
+      await Promise.all([
+        warmVodCache().catch((e) => { logger.error(`[warmVodCache interval] ${e}`); }),
+        warmSeriesCache().catch((e) => { logger.error(`[warmSeriesCache interval] ${e}`); }),
+      ]);
+      await cleanupGenres().catch((e) => logger.error(`[cleanupGenres interval] ${e}`));
+      await warmSeriesInfoCache().catch((e) => logger.error(`[warmSeriesInfoCache interval] ${e}`));
+    })();
   }, 24 * 60 * 60 * 1000);
 };
 

@@ -3,6 +3,13 @@ import { initialConfig, seriesFlag } from "@/config/server";
 import { readChannels, readGenres } from "./storage";
 import { serverManager } from "@/serverManager";
 import { SystemConfig } from "@/models/SystemConfig";
+import {
+  applyGenreOverrides,
+  applyChannelOverrides,
+  applyPortalItemOverrides,
+} from "@/utils/overrides";
+import { xtreamCache } from "@/routes/xtream";
+import { ContentOverride } from "@/models/ContentOverride";
 
 // Cache
 let liveCache: string = "#EXTM3U";
@@ -89,14 +96,19 @@ export async function getM3uV2(host: string) {
     return liveCache;
   }
 
-  const m3u = (allPrograms ?? [])
+  const originalTitleMap = new Map(genres.map((g: any) => [g.id, g.title]));
+  const visibleGenres = await applyGenreOverrides(genres, "channel");
+  const genreMap = new Map(visibleGenres.map((g: any) => [g.id, g]));
+  const visibleChannels = await applyChannelOverrides(allPrograms);
+
+  const m3u = visibleChannels
     .filter((channel) => {
-      const genre = genres.find((r) => r.id === channel.tv_genre_id);
+      const genre = genreMap.get(channel.tv_genre_id);
       if (!genre) return false;
-      return matchesGroups(genre.title);
+      return matchesGroups(originalTitleMap.get(channel.tv_genre_id) ?? genre.title);
     })
     .map((channel) => {
-      const genre = genres.find((r) => r.id === channel.tv_genre_id)!;
+      const genre = genreMap.get(channel.tv_genre_id)!;
       return channelToM3u(channel, genre.title, host);
     })
     .sort(
@@ -169,43 +181,90 @@ export async function getEPGV2() {
 
 async function buildVodM3u(host: string): Promise<string> {
   const groups = await readGenres("movie");
+  const visibleGroups = await applyGenreOverrides(groups, "movie");
   const m3uLines: any[] = [];
 
-  for (const group of groups) {
+  const getVodCache = (catId: string) =>
+    xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
+  const getSeriesCache = (catId: string) =>
+    xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
+
+  for (const group of visibleGroups) {
     if (group.id === "*") continue;
+
+    const buildLine = (item: any, isSeries: boolean) => {
+      const rawLogo = (item as any).screenshot_uri || (item as any).stream_icon || (item as any).cover || "";
+      const proto = initialConfig.https ? "https" : "http";
+      const logoUrl = rawLogo
+        ? rawLogo.startsWith("http") ? rawLogo : `${proto}://${initialConfig.hostname}:${initialConfig.port}${rawLogo}`
+        : "";
+      const cleanName = item.name.replaceAll(",", "").replaceAll(" - ", "-");
+      const groupTitle = isSeries ? `Series - ${group.title}` : `VOD - ${group.title}`;
+      m3uLines.push({
+        title: groupTitle,
+        name: cleanName,
+        header: `#EXTINF:-1 tvg-id="${item.id}" tvg-name="${cleanName}"${logoUrl ? ` tvg-logo="${logoUrl}"` : ""} group-title="${groupTitle}",${cleanName}`,
+        command: `http://${host}/api/vod/play?id=${encodeURIComponent(item.id)}&category=${encodeURIComponent(group.id)}`,
+      });
+    };
+
+    if (String(group.id).startsWith("vcat_")) {
+      // Virtual categories have no portal backing — fetch items from ContentOverride + xtreamCache
+      const movedMovies = await ContentOverride.findAll({
+        where: { item_type: "movie", target_category_id: String(group.id) },
+        raw: true,
+      });
+      for (const ov of movedMovies) {
+        if (ov.hidden || !ov.original_category_id) continue;
+        const itemId = ov.item_key.replace("movie_", "");
+        const srcItems = await getVodCache(ov.original_category_id);
+        const srcItem = srcItems.find((i: any) => String(i.stream_id) === itemId);
+        if (!srcItem) continue;
+        buildLine({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name }, false);
+      }
+      const movedSeries = await ContentOverride.findAll({
+        where: { item_type: "series", target_category_id: String(group.id) },
+        raw: true,
+      });
+      for (const ov of movedSeries) {
+        if (ov.hidden || !ov.original_category_id) continue;
+        const itemId = ov.item_key.replace("series_", "");
+        const srcItems = await getSeriesCache(ov.original_category_id);
+        const srcItem = srcItems.find((i: any) => String(i.series_id) === itemId);
+        if (!srcItem) continue;
+        buildLine({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name }, true);
+      }
+      continue;
+    }
+
+    // Collect all pages first so moved-in items are added exactly once per group
+    const allRawMovies: any[] = [];
+    const allRawSeries: any[] = [];
     let page = 1;
     while (true) {
       const result = await serverManager.getProvider().getMovies({ category: group.id, page });
       if (!result?.js?.data) break;
-      const items = Array.isArray(result.js.data) ? result.js.data : [];
-      if (items.length === 0) break;
-
-      for (const item of items) {
-        const logoUrl = (item as any).screenshot_uri
-          ? (item as any).screenshot_uri.startsWith("http")
-            ? (item as any).screenshot_uri
-            : `http://${initialConfig.hostname}:${initialConfig.port}${(item as any).screenshot_uri}`
-          : "";
-        const cleanName = item.name.replaceAll(",", "").replaceAll(" - ", "-");
-        const isSeries = (item as any)[seriesFlag] == 1;
-        const groupTitle = isSeries ? `Series - ${group.title}` : `VOD - ${group.title}`;
-
-        m3uLines.push({
-          title: groupTitle,
-          name: cleanName,
-          header: `#EXTINF:-1 tvg-id="${item.id}" tvg-name="${cleanName}"${
-            logoUrl ? ` tvg-logo="${logoUrl}"` : ""
-          } group-title="${groupTitle}",${cleanName}`,
-          command: `http://${host}/api/vod/play?id=${encodeURIComponent(item.id)}&category=${encodeURIComponent(group.id)}`,
-        });
-      }
-
-      if (items.length < 14) break;
+      const rawItems = Array.isArray(result.js.data) ? result.js.data : [];
+      if (rawItems.length === 0) break;
+      allRawMovies.push(...rawItems.filter((i: any) => i[seriesFlag] != 1));
+      allRawSeries.push(...rawItems.filter((i: any) => i[seriesFlag] == 1));
+      if (rawItems.length < 14) break;
       page++;
     }
+
+    const overriddenMovies = await applyPortalItemOverrides(allRawMovies, "movie", String(group.id), getVodCache);
+    const overriddenSeries = await applyPortalItemOverrides(allRawSeries, "series", String(group.id), getSeriesCache);
+
+    for (const item of overriddenMovies) buildLine(item, false);
+    for (const item of overriddenSeries) buildLine(item, true);
   }
 
   return new M3U(m3uLines).print(initialConfig);
+}
+
+export function invalidateVodCache(): void {
+  vodCache = "#EXTM3U";
+  vodCacheTime = 0;
 }
 
 export async function refreshVodCache(host: string) {

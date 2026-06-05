@@ -15,8 +15,14 @@ import { ConfigProfile } from "@/models/ConfigProfile";
 import { stalkerApi } from "@/utils/stalker";
 import { Readable } from "stream";
 import { XtreamCache } from "@/models/XtreamCache";
+import { ContentOverride } from "@/models/ContentOverride";
 import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres, catchupScan, xtreamCache } from "@/routes/xtream";
 import { logger } from "@/utils/logger";
+import {
+  applyGenreOverrides,
+  applyChannelOverrides,
+  applyPortalItemOverrides,
+} from "@/utils/overrides";
 
 const getActiveProfileId = async () => {
   const activeProfile = await ConfigProfile.findOne({
@@ -108,10 +114,13 @@ export const stalkerV2: ServerRoute[] = [
           return groups;
         }
 
-        const filteredGroups = groups.filter(
-          (group) =>
-            initialConfig.groups.length === 0 ||
-            initialConfig.groups.includes(group.title),
+        const filteredGroups = await applyGenreOverrides(
+          groups.filter(
+            (group) =>
+              initialConfig.groups.length === 0 ||
+              initialConfig.groups.includes(group.title),
+          ),
+          "channel",
         );
         return filteredGroups;
       } catch (err) {
@@ -167,20 +176,14 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = await readGenres("channel", profileId);
-        const mapped = (channels ?? []).map(mapChannel);
-        // If no genres loaded yet, skip genre filtering
-        if (genres.length === 0) {
-          return mapped.sort((a, b) => a.name.localeCompare(b.name));
-        }
-        return mapped
-          .filter((channel) => {
-            const genre = genres.find((r) => r.id === channel.tv_genre_id);
-            return (
-              genre &&
-              (initialConfig.groups.length === 0 ||
-                initialConfig.groups.includes(genre.title))
-            );
-          })
+        const originalTitleMap = new Map(genres.map((g: any) => [g.id, g.title]));
+        const visibleGenres = await applyGenreOverrides(genres, "channel");
+        const visibleGenreIds = new Set(visibleGenres.map((g: any) => g.id));
+        const overriddenChannels = await applyChannelOverrides(channels);
+        return overriddenChannels
+          .filter((channel) => visibleGenreIds.has(channel.tv_genre_id) &&
+            (initialConfig.groups.length === 0 ||
+              initialConfig.groups.includes(originalTitleMap.get(channel.tv_genre_id) ?? "")))
           .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
         console.error(err);
@@ -235,7 +238,7 @@ export const stalkerV2: ServerRoute[] = [
           total_items: channels.length,
           actual_length: channels.length,
           total_loaded: channels.length,
-          data: channels.sort((a, b) => a.title.localeCompare(b.title)),
+          data: await applyGenreOverrides(channels, "movie"),
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
@@ -273,13 +276,44 @@ export const stalkerV2: ServerRoute[] = [
         const itemsPerApiPage = 14;
         const pagesToFetchAtOnce = 1;
         const startApiPage = Number(page);
+
+        if (String(category).startsWith("vcat_") && Number(movieId) === 0) {
+          const movedIn = await ContentOverride.findAll({
+            where: { item_type: "movie", target_category_id: String(category) },
+            raw: true,
+          });
+          const allItems: any[] = [];
+          for (const ov of movedIn) {
+            if (ov.hidden) continue;
+            if (!ov.original_category_id) continue;
+            const itemId = ov.item_key.replace("movie_", "");
+            const srcItems = (await xtreamCache.get<any[]>(`vod_streams_${ov.original_category_id}`)) ?? [];
+            const srcItem = srcItems.find((i: any) => String(i.stream_id) === itemId);
+            if (!srcItem) continue;
+            allItems.push({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name });
+          }
+          const offset = (startApiPage - 1) * itemsPerApiPage;
+          const pageData = allItems.slice(offset, offset + itemsPerApiPage);
+          return h.response({
+            success: true,
+            page: Number(page),
+            pageAtaTime: 1,
+            total_items: allItems.length,
+            actual_length: itemsPerApiPage,
+            total_loaded: pageData.length,
+            data: pageData,
+            errors: false,
+            isPortal: initialConfig.providerType === "stalker",
+          });
+        }
+
         const fetchPage = async (pageNum: number) => {
           try {
             let sortParam = "added";
             if (sort === "alphabetic") sortParam = "name";
 
             const res = await serverManager.getProvider().getMovies({
-              category,
+              category: String(category).startsWith("vcat_") ? "*" : category,
               page: pageNum,
               movieId,
               seasonId,
@@ -324,24 +358,26 @@ export const stalkerV2: ServerRoute[] = [
           ? rawData.filter((item: any) => item[seriesFlag] != 1)
           : rawData;
 
+        const getVodCache = (catId: string) =>
+          xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
+
         // Page 1 may be entirely series (newest-first sort) — fall back to warm cache for movies
         if (Number(movieId) === 0 && firstPageData.length === 0 && rawData.length > 0) {
           const cachedMovies = await xtreamCache.get<any[]>(`vod_streams_${category}`);
           if (cachedMovies && cachedMovies.length > 0) {
+            // Apply overrides to full cache (not paginated slice) so moved-in items land at correct pages
+            const allNormalized = cachedMovies.map((m: any) => ({ ...m, id: String(m.stream_id) }));
+            const allOverridden = await applyPortalItemOverrides(allNormalized, "movie", String(category), getVodCache);
             const offset = (startApiPage - 1) * itemsPerApiPage;
-            firstPageData = cachedMovies.slice(offset, offset + itemsPerApiPage).map((m: any) => ({
-              ...m,
-              id: String(m.stream_id),
-            }));
-            const actualTotalItems = cachedMovies.length;
+            const pageData = allOverridden.slice(offset, offset + itemsPerApiPage);
             return {
               success: true,
               page: Number(page),
               pageAtaTime: 1,
-              total_items: actualTotalItems,
+              total_items: allOverridden.length,
               actual_length: itemsPerApiPage,
-              total_loaded: firstPageData.length,
-              data: firstPageData,
+              total_loaded: pageData.length,
+              data: pageData,
               errors: false,
               isPortal: initialConfig.providerType === "stalker",
             };
@@ -376,7 +412,9 @@ export const stalkerV2: ServerRoute[] = [
           total_items: actualTotalItems,
           actual_length: itemsPerApiPage,
           total_loaded: firstPageData.length,
-          data: firstPageData,
+          data: Number(movieId) === 0
+            ? await applyPortalItemOverrides(firstPageData, "movie", String(category), getVodCache)
+            : firstPageData,
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
@@ -400,9 +438,7 @@ export const stalkerV2: ServerRoute[] = [
           episodeId = 0,
           page = 1,
           search = "",
-          token,
           sort,
-          ...others
         } = request.query;
 
         if (category == 0 && movieId == 0) {
@@ -413,6 +449,36 @@ export const stalkerV2: ServerRoute[] = [
         const pagesToFetchAtOnce = 1;
         const startApiPage = Number(page);
 
+        if (String(category).startsWith("vcat_") && Number(movieId) === 0) {
+          const movedIn = await ContentOverride.findAll({
+            where: { item_type: "series", target_category_id: String(category) },
+            raw: true,
+          });
+          const allItems: any[] = [];
+          for (const ov of movedIn) {
+            if (ov.hidden) continue;
+            if (!ov.original_category_id) continue;
+            const itemId = ov.item_key.replace("series_", "");
+            const srcItems = (await xtreamCache.get<any[]>(`series_list_${ov.original_category_id}`)) ?? [];
+            const srcItem = srcItems.find((i: any) => String(i.series_id) === itemId);
+            if (!srcItem) continue;
+            allItems.push({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name, [seriesFlag]: 1 });
+          }
+          const offset = (startApiPage - 1) * itemsPerApiPage;
+          const pageData = allItems.slice(offset, offset + itemsPerApiPage);
+          return h.response({
+            success: true,
+            page: Number(page),
+            pageAtaTime: 1,
+            total_items: allItems.length,
+            actual_length: itemsPerApiPage,
+            total_loaded: pageData.length,
+            data: pageData,
+            errors: false,
+            isPortal: initialConfig.providerType === "stalker",
+          });
+        }
+
         const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
         const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
 
@@ -421,9 +487,10 @@ export const stalkerV2: ServerRoute[] = [
             let sortParam = "added";
             if (sort === "alphabetic") sortParam = "name";
 
+            const portalCategory = String(category).startsWith("vcat_") ? "*" : category;
             const res = isNativeSeries
-              ? await serverManager.getProvider().getSeries({ category, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam, token, ...others })
-              : await serverManager.getProvider().getMovies({ category, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam });
+              ? await serverManager.getProvider().getSeries({ category: portalCategory, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam })
+              : await serverManager.getProvider().getMovies({ category: portalCategory, page: pageNum, movieId, seasonId, episodeId, search, sort: sortParam });
             return { page: pageNum, ...res.js };
           } catch (err: any) {
             console.error(`Failed to fetch page ${pageNum}:`, err.stack || err);
@@ -458,21 +525,26 @@ export const stalkerV2: ServerRoute[] = [
           ? (isNativeSeries ? rawData : rawData.filter((item: any) => item[seriesFlag] == 1))
           : rawData;
 
+        const getSeriesCache = (catId: string) =>
+          xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
+
         // VOD-mixed: page 1 may be entirely movies — fall back to warm cache for series
         if (Number(movieId) === 0 && !isNativeSeries && firstPageData.length === 0 && rawData.length > 0) {
           const cachedSeries = await xtreamCache.get<any[]>(`series_list_${category}`);
           if (cachedSeries && cachedSeries.length > 0) {
-            const offset = (startApiPage - 1) * itemsPerApiPage;
-            const pageData = cachedSeries.slice(offset, offset + itemsPerApiPage).map((s: any) => ({
+            const allNormalized = cachedSeries.map((s: any) => ({
               ...s,
               id: String(s.series_id),
               [seriesFlag]: 1,
             }));
+            const allOverridden = await applyPortalItemOverrides(allNormalized, "series", String(category), getSeriesCache);
+            const offset = (startApiPage - 1) * itemsPerApiPage;
+            const pageData = allOverridden.slice(offset, offset + itemsPerApiPage);
             return {
               success: true,
               page: Number(page),
               pageAtaTime: 1,
-              total_items: cachedSeries.length,
+              total_items: allOverridden.length,
               actual_length: itemsPerApiPage,
               total_loaded: pageData.length,
               data: pageData,
@@ -495,7 +567,9 @@ export const stalkerV2: ServerRoute[] = [
           total_items: actualTotalItems,
           actual_length: itemsPerApiPage,
           total_loaded: firstPageData.length,
-          data: firstPageData,
+          data: Number(movieId) === 0
+            ? await applyPortalItemOverrides(firstPageData, "series", String(category), getSeriesCache)
+            : firstPageData,
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
@@ -679,7 +753,7 @@ export const stalkerV2: ServerRoute[] = [
           actual_length: channels.length,
           total_loaded: channels.length,
 
-          data: channels.sort((a, b) => (a.number || 0) - (b.number || 0)),
+          data: await applyGenreOverrides(channels, "series"),
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };

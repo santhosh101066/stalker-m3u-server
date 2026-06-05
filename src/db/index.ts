@@ -8,6 +8,10 @@ import { Channel } from "../models/Channel";
 import { Genre } from "../models/Genre";
 import { EpgCache } from "../models/EpgCache";
 import { XtreamCache } from "../models/XtreamCache";
+import { GenreOverride } from "../models/GenreOverride";
+import { ContentOverride } from "../models/ContentOverride";
+import { StrmMovie } from "../models/StrmMovie";
+import { StrmSeries } from "../models/StrmSeries";
 
 function resolveDatabasePath(): string {
   const envPath = process.env.SQLITE_DB_PATH;
@@ -38,7 +42,7 @@ if (!fs.existsSync(databaseDir)) {
 export const sequelize = new Sequelize({
   dialect: "sqlite",
   storage: databasePath,
-  models: [Token, SystemConfig, ConfigProfile, Channel, Genre, EpgCache, XtreamCache],
+  models: [Token, SystemConfig, ConfigProfile, Channel, Genre, EpgCache, XtreamCache, GenreOverride, ContentOverride, StrmMovie, StrmSeries],
   logging: false,
 });
 
@@ -47,7 +51,7 @@ export async function initDB() {
     await sequelize.authenticate();
     console.log("Database connection has been established successfully.");
     console.log(`Using SQLite database at: ${databasePath}`);
-    await sequelize.sync();
+    await sequelize.sync({ alter: true });
     console.log("Database models synced.");
   } catch (error) {
     console.error("Unable to connect to the database:", error);

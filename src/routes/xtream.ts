@@ -5,9 +5,18 @@ import { ConfigProfile } from "@/models/ConfigProfile";
 import { liveStreamService } from "@/services/LiveStreamService";
 import { serverManager } from "@/serverManager";
 import { logger } from "@/utils/logger";
-import { initialConfig, seriesFlag } from "@/config/server";
+import { initialConfig, seriesFlag, serverProtocol } from "@/config/server";
 import { readGenres, readChannels, upsertGenre, deleteGenre } from "@/utils/storage";
+import {
+  applyXtreamCatOverrides,
+  applyXtreamChannelOverrides,
+  applyVodOverrides,
+  applySeriesOverrides,
+  getHiddenGenreIds,
+} from "@/utils/overrides";
 import { getEpgCache } from "@/utils/epg";
+import { fetchMovieMeta, fetchTVMeta, TmdbMeta } from "@/utils/tmdb";
+import { SystemConfig } from "@/models/SystemConfig";
 import { handleProxyStream } from "./proxy";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -44,6 +53,36 @@ export const xtreamCache = {
   },
 };
 
+// ── Category versioning ────────────────────────────────────────────────────────
+// Each warm cycle that finds new content writes a fresh Unix timestamp as the
+// version. The timestamp is appended to every VOD/series category ID in Xtream
+// API responses. The player sees new category IDs and re-fetches stream lists.
+// Internally all cache lookups always use the bare (unversioned) genre ID, so
+// a single vod_cat_version row in SystemConfig is the only moving part.
+
+async function getVodVersion(): Promise<number> {
+  try {
+    const row = await SystemConfig.findByPk("vod_cat_version");
+    return row ? (Number(row.value) || 1) : 1;
+  } catch { return 1; }
+}
+
+export async function bumpVodVersion(): Promise<void> {
+  const ts = Date.now();
+  await SystemConfig.upsert({ key: "vod_cat_version", value: ts });
+  logger.info(`[Xtream] VOD category version set to ${ts}`);
+}
+
+const vodVersioningEnabled = process.env.VOD_CATEGORY_VERSIONING === "true";
+
+function addVer(id: string | number, v: number): string {
+  return vodVersioningEnabled ? `${id}_v${v}` : String(id);
+}
+
+function stripVer(id: string): string {
+  return id.replace(/_v\d+$/, "");
+}
+
 function userInfo() {
   return {
     username:               initialConfig.username || "admin",
@@ -67,7 +106,7 @@ function serverInfo(request: any) {
     url:             host,
     port:            port,
     https_port:      "443",
-    server_protocol: "http",
+    server_protocol: serverProtocol,
     rtmp_port:       port,
     timezone:        "UTC",
     timestamp_now:   Math.floor(Date.now() / 1000),
@@ -78,7 +117,8 @@ function serverInfo(request: any) {
 function buildIconUrl(uri: string | undefined): string {
   if (!uri) return "";
   if (uri.startsWith("http")) return uri;
-  return `http://${initialConfig.hostname}:${initialConfig.port}${uri}`;
+  const proto = initialConfig.https ? "https" : "http";
+  return `${proto}://${initialConfig.hostname}:${initialConfig.port}${uri}`;
 }
 
 async function fetchAllPages(
@@ -115,7 +155,16 @@ async function fetchUntilKnown(
 let seriesWarmRunning = false;
 let vodWarmRunning    = false;
 
+function toUnixAdded(added: any): string {
+  if (!added) return "";
+  const n = Number(added);
+  if (!isNaN(n) && n > 1000000000) return String(n);
+  const d = new Date(added);
+  return isNaN(d.getTime()) ? "" : String(Math.floor(d.getTime() / 1000));
+}
+
 function mapVodItem(m: any, num: number, categoryId: string | number): any {
+  const added = toUnixAdded(m.added);
   if (m.cmd) xtreamCache.set(`vod_cmd_${m.id}`, m.cmd);
   xtreamCache.set(`vod_info_${m.id}`, {
     info: {
@@ -135,7 +184,7 @@ function mapVodItem(m: any, num: number, categoryId: string | number): any {
     movie_data: {
       stream_id:           parseInt(m.id),
       name:                m.name,
-      added:               m.added || "",
+      added,
       category_id:         String(categoryId),
       container_extension: "m3u8",
       custom_sid:          "",
@@ -150,7 +199,7 @@ function mapVodItem(m: any, num: number, categoryId: string | number): any {
     stream_icon:         buildIconUrl(m.screenshot_uri),
     rating:              m.rating_imdb || 0,
     year:                m.year || "",
-    added:               m.added || "",
+    added,
     category_id:         String(categoryId),
     container_extension: "m3u8",
     custom_sid:          "",
@@ -178,9 +227,10 @@ function mapSeriesItem(s: any, num: number, categoryId: string | number): any {
   };
 }
 
-export async function warmSeriesCache(): Promise<void> {
-  if (seriesWarmRunning) { logger.info("[XtreamSeries] Warm already running, skipping"); return; }
+export async function warmSeriesCache(): Promise<boolean> {
+  if (seriesWarmRunning) { logger.info("[XtreamSeries] Warm already running, skipping"); return false; }
   seriesWarmRunning = true;
+  let newContentFound = false;
   try {
     const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
     const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
@@ -214,11 +264,13 @@ export async function warmSeriesCache(): Promise<void> {
           if (!isNativeSeries && cachedMovies.length > 0) {
             await upsertGenre(genre, "movie"); // keep genre registered
           }
+          if (existing.length > 0) await xtreamCache.set(cacheKey, existing);
           logger.info(`[XtreamSeries] ${cacheKey}: up to date, skipping`);
           continue;
         }
 
         if (newSeries.length > 0) {
+          newContentFound = true;
           const result = [
             ...newSeries.map((s, idx) => mapSeriesItem(s, idx + 1, genre.id)),
             ...existing.map((s: any, idx: number) => ({ ...s, num: newSeries.length + idx + 1 })),
@@ -228,6 +280,7 @@ export async function warmSeriesCache(): Promise<void> {
         }
 
         if (newMovies.length > 0) {
+          newContentFound = true;
           const vodKey = `vod_streams_${genre.id}`;
           const result = [
             ...newMovies.map((m, idx) => mapVodItem(m, idx + 1, genre.id)),
@@ -245,7 +298,13 @@ export async function warmSeriesCache(): Promise<void> {
       }
     }
 
-  } finally { seriesWarmRunning = false; }
+  } finally {
+    if (newContentFound) {
+      try { await bumpVodVersion(); } catch (e: any) { logger.error(`[XtreamSeries] Failed to bump version: ${e.message}`); }
+    }
+    seriesWarmRunning = false;
+  }
+  return newContentFound;
 }
 
 export async function warmSeriesInfoCache(): Promise<void> {
@@ -598,6 +657,7 @@ export async function catchupScan(): Promise<void> {
       }
     }
 
+    await bumpVodVersion();
     logger.info("[Catchup] Scan complete");
   } finally {
     catchupRunning = false;
@@ -651,9 +711,10 @@ export async function cleanupGenres(): Promise<void> {
   }
 }
 
-export async function warmVodCache(): Promise<void> {
-  if (vodWarmRunning) { logger.info("[XtreamVod] Warm already running, skipping"); return; }
+export async function warmVodCache(): Promise<boolean> {
+  if (vodWarmRunning) { logger.info("[XtreamVod] Warm already running, skipping"); return false; }
   vodWarmRunning = true;
+  let newContentFound = false;
   try {
     const genres = await readGenres("movie");
     const provider = serverManager.getProvider();
@@ -699,11 +760,13 @@ export async function warmVodCache(): Promise<void> {
           } else if (existingSeries.length > 0) {
             await upsertGenre(genre, "series"); // keep genre registered
           }
+          if (existing.length > 0) await xtreamCache.set(cacheKey, existing);
           logger.info(`[XtreamVOD] ${cacheKey}: up to date, skipping`);
           continue;
         }
 
         if (newMovies.length > 0) {
+          newContentFound = true;
           const result = [
             ...newMovies.map((m, idx) => mapVodItem(m, idx + 1, genre.id)),
             ...existing.map((m: any, idx: number) => ({ ...m, num: newMovies.length + idx + 1 })),
@@ -713,6 +776,7 @@ export async function warmVodCache(): Promise<void> {
         }
 
         if (newSeries.length > 0) {
+          newContentFound = true;
           const seriesKey = `series_list_${genre.id}`;
           const result = [
             ...newSeries.map((s, idx) => mapSeriesItem(s, idx + 1, genre.id)),
@@ -730,7 +794,13 @@ export async function warmVodCache(): Promise<void> {
       }
     }
 
-  } finally { vodWarmRunning = false; }
+  } finally {
+    if (newContentFound) {
+      try { await bumpVodVersion(); } catch (e: any) { logger.error(`[XtreamVod] Failed to bump version: ${e.message}`); }
+    }
+    vodWarmRunning = false;
+  }
+  return newContentFound;
 }
 
 export const xtreamRoutes: ServerRoute[] = [
@@ -790,251 +860,323 @@ export const xtreamRoutes: ServerRoute[] = [
         // ── Live ────────────────────────────────────────────────────────────
 
         if (action === "get_live_categories") {
-          const cached = await xtreamCache.get("live_cats");
-          if (cached) return h.response(cached);
-          const genres = await readGenres("channel");
-          const result = genres
-            .filter((g: any) => g.id && g.id !== "*")
-            .map((g: any) => ({
-              category_id:   g.id,
-              category_name: g.title,
-              parent_id:     0,
-            }));
-          await xtreamCache.set("live_cats", result);
-          return h.response(result);
+          let raw: any[];
+          const cached = await xtreamCache.get<any[]>("live_cats");
+          if (cached) {
+            raw = cached;
+          } else {
+            const genres = await readGenres("channel");
+            raw = genres
+              .filter((g: any) => g.id && g.id !== "*")
+              .map((g: any) => ({
+                category_id:   g.id,
+                category_name: g.title,
+                parent_id:     0,
+              }));
+            await xtreamCache.set("live_cats", raw);
+          }
+          return h.response(await applyXtreamCatOverrides(raw, "channel"));
         }
 
         if (action === "get_live_streams") {
           const { category_id } = request.query as Record<string, string>;
           const cacheKey = `live_streams_${category_id || "all"}`;
-          const cached = await xtreamCache.get(cacheKey);
-          if (cached) return h.response(cached);
-
-          const data     = await provider.getChannels();
-          const channels = data?.js?.data || [];
-          const filtered = category_id
-            ? channels.filter((c: any) => c.tv_genre_id === category_id)
-            : channels;
-          const result = filtered.map((c: any, idx: number) => ({
-            num:                 idx + 1,
-            name:                c.name?.trim(),
-            stream_type:         "live",
-            stream_id:           c.id,
-            stream_icon:         buildIconUrl(c.logo),
-            epg_channel_id:      c.id,
-            added:               "",
-            category_id:         c.tv_genre_id || "0",
-            tv_archive:          0,
-            tv_archive_duration: 0,
-            direct_source:       "",
-          }));
-          await xtreamCache.set(cacheKey, result);
-          return h.response(result);
+          let raw: any[];
+          const cached = await xtreamCache.get<any[]>(cacheKey);
+          if (cached) {
+            raw = cached;
+          } else {
+            const data     = await provider.getChannels();
+            const channels = data?.js?.data || [];
+            const filtered = category_id
+              ? channels.filter((c: any) => c.tv_genre_id === category_id)
+              : channels;
+            raw = filtered.map((c: any, idx: number) => ({
+              num:                 idx + 1,
+              name:                c.name?.trim(),
+              stream_type:         "live",
+              stream_id:           c.id,
+              stream_icon:         buildIconUrl(c.logo),
+              epg_channel_id:      c.id,
+              added:               "",
+              category_id:         c.tv_genre_id || "0",
+              tv_archive:          0,
+              tv_archive_duration: 0,
+              direct_source:       "",
+            }));
+            await xtreamCache.set(cacheKey, raw);
+          }
+          return h.response(await applyXtreamChannelOverrides(raw));
         }
 
         // ── VOD ─────────────────────────────────────────────────────────────
 
         if (action === "get_vod_categories") {
-          const cached = await xtreamCache.get("vod_cats");
-          if (cached) return h.response(cached);
-          const genres = await readGenres("movie");
-          const result = genres
-            .filter((g: any) => g.id && g.id !== "*")
-            .map((g: any) => ({
-              category_id:   g.id,
-              category_name: g.title,
-              parent_id:     0,
-            }));
-          await xtreamCache.set("vod_cats", result);
-          return h.response(result);
+          let raw: any[];
+          const cached = await xtreamCache.get<any[]>("vod_cats");
+          if (cached) {
+            raw = cached;
+          } else {
+            const genres = await readGenres("movie");
+            raw = genres
+              .filter((g: any) => g.id && g.id !== "*")
+              .map((g: any) => ({
+                category_id:   g.id,
+                category_name: g.title,
+                parent_id:     0,
+              }));
+            await xtreamCache.set("vod_cats", raw);
+          }
+          const vodCats = await applyXtreamCatOverrides(raw, "movie");
+          const v = await getVodVersion();
+          logger.info(`[player_api] get_vod_categories — version=${v} count=${vodCats.length}`);
+          return h.response(vodCats.map((c: any) => ({ ...c, category_id: addVer(c.category_id, v) })));
         }
 
         if (action === "get_vod_streams") {
-          const { category_id, search } = request.query as Record<string, string>;
+          const { category_id: rawCatId, search } = request.query as Record<string, string>;
+          const category_id = rawCatId ? stripVer(rawCatId) : rawCatId;
+          logger.info(`[player_api] get_vod_streams request — raw_category_id=${rawCatId ?? "(none)"} stripped=${category_id ?? "(none)"} search=${search ?? "(none)"}`);
+          const getVodCache = (catId: string) =>
+            xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
+          let rawResult: any[];
 
           if (search) {
             const genres = await readGenres("movie");
+            const hiddenIds = await getHiddenGenreIds("movie");
             const all: any[] = [];
             for (const genre of genres) {
               if (!genre.id || genre.id === "*") continue;
+              if (hiddenIds.has(String(genre.id))) continue;
               const cached = await xtreamCache.get<any[]>(`vod_streams_${genre.id}`);
               if (cached) all.push(...cached);
             }
             const term = search.toLowerCase();
-            const results = all.filter((m: any) => m.name?.toLowerCase().includes(term));
-            logger.info(`[player_api] get_vod_streams search="${search}": ${results.length}`);
-            return h.response(results);
-          }
-
-          if (!category_id) {
+            rawResult = all.filter((m: any) => m.name?.toLowerCase().includes(term));
+            logger.info(`[player_api] get_vod_streams search="${search}": ${rawResult.length}`);
+          } else if (!category_id) {
             const genres = await readGenres("movie");
+            const hiddenIds = await getHiddenGenreIds("movie");
             const all: any[] = [];
             for (const genre of genres) {
               if (!genre.id || genre.id === "*") continue;
+              if (hiddenIds.has(String(genre.id))) continue;
               const cached = await xtreamCache.get<any[]>(`vod_streams_${genre.id}`);
               if (cached) all.push(...cached);
             }
+            rawResult = all;
             logger.info(`[player_api] get_vod_streams (all): ${all.length} movies`);
-            return h.response(all);
-          }
+          } else if (category_id.startsWith("vcat_")) {
+            rawResult = [];
+          } else {
+            const cacheKey = `vod_streams_${category_id}`;
+            const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
 
-          const cacheKey = `vod_streams_${category_id}`;
-          const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
-          if (cached && !isStale) return h.response(cached);
-
-          if (cached) {
-            // Stale — fetch only new items; stop on first known item (movie or series)
-            const existingMovieIds = new Set(cached.map((m: any) => String(m.stream_id)));
-            const existingSeries = await xtreamCache.get<any[]>(`series_list_${category_id}`);
-            const existingSeriesIds = new Set((existingSeries || []).map((s: any) => String(s.series_id)));
-            const newRaw = await fetchUntilKnown(
-              async (page) => {
+            if (cached && !isStale) {
+              rawResult = cached;
+            } else if (cached) {
+              // Stale — fetch only new items; stop on first known item
+              const existingMovieIds = new Set(cached.map((m: any) => String(m.stream_id)));
+              const existingSeries = await xtreamCache.get<any[]>(`series_list_${category_id}`);
+              const existingSeriesIds = new Set((existingSeries || []).map((s: any) => String(s.series_id)));
+              const newRaw = await fetchUntilKnown(
+                async (page) => {
+                  const res = await provider.getMovies({ category: category_id, page });
+                  return res?.js?.data || [];
+                },
+                (item) => existingMovieIds.has(String(item.id)) || existingSeriesIds.has(String(item.id)),
+              );
+              const newItems = newRaw.filter((i: any) => i[seriesFlag] != 1);
+              if (newItems.length === 0) {
+                rawResult = cached;
+                await xtreamCache.set(cacheKey, cached);
+              } else {
+                rawResult = [
+                  ...newItems.map((m, idx) => mapVodItem(m, idx + 1, category_id)),
+                  ...cached.map((m: any, idx: number) => ({ ...m, num: newItems.length + idx + 1 })),
+                ];
+                await xtreamCache.set(cacheKey, rawResult);
+              }
+            } else {
+              // Cache miss — full fetch
+              const allRawVod = await fetchAllPages(async (page) => {
                 const res = await provider.getMovies({ category: category_id, page });
                 return res?.js?.data || [];
-              },
-              (item) => existingMovieIds.has(String(item.id)) || existingSeriesIds.has(String(item.id)),
-            );
-            const newItems = newRaw.filter((i: any) => i[seriesFlag] != 1);
-            if (newItems.length === 0) {
-              await xtreamCache.set(cacheKey, cached);
-              return h.response(cached);
+              });
+              if (allRawVod.length === 0) return h.response([]);
+              const vodItems = allRawVod.filter((i: any) => i[seriesFlag] != 1);
+              rawResult = vodItems.map((m, idx) => mapVodItem(m, idx + 1, category_id));
+              await xtreamCache.set(cacheKey, rawResult);
             }
-            const result = [
-              ...newItems.map((m, idx) => mapVodItem(m, idx + 1, category_id)),
-              ...cached.map((m: any, idx: number) => ({ ...m, num: newItems.length + idx + 1 })),
-            ];
-            await xtreamCache.set(cacheKey, result);
-            return h.response(result);
           }
 
-          // Cache miss — full fetch
-          const allRawVod = await fetchAllPages(async (page) => {
-            const res = await provider.getMovies({ category: category_id, page });
-            return res?.js?.data || [];
-          });
-          if (allRawVod.length === 0) return h.response([]);
-          const items = allRawVod.filter((i: any) => i[seriesFlag] != 1);
-          const result = items.map((m, idx) => mapVodItem(m, idx + 1, category_id));
-          await xtreamCache.set(cacheKey, result);
-          return h.response(result);
+          const vodOverridden = await applyVodOverrides(rawResult, category_id ?? null, getVodCache);
+          const vv = await getVodVersion();
+          const finalResult = vodOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vv) }));
+          const cat7Sample = finalResult.filter((i: any) => i.category_id === addVer("7", vv)).slice(0, 5);
+          if (cat7Sample.length > 0) logger.info(`[player_api] cat7 top5: ${cat7Sample.map((i: any) => `${i.name}(added=${i.added})`).join(", ")}`);
+          return h.response(finalResult);
         }
 
         if (action === "get_vod_info") {
           const { vod_id } = request.query as Record<string, string>;
+          if (!vod_id) return h.response({ info: {}, movie_data: {} });
           const cacheKey = `vod_info_${vod_id}`;
-          const cached   = await xtreamCache.get(cacheKey);
-          if (cached) return h.response(cached);
+          let cached = await xtreamCache.get<any>(cacheKey);
 
-          const data = await provider.getMovies({ category: "*", page: 1, movieId: parseInt(vod_id) });
-          const item = data?.js?.data?.[0] as any;
-          if (!item) return h.response({ info: {}, movie_data: {} });
+          if (!cached) {
+            const data = await provider.getMovies({ category: "*", page: 1, movieId: parseInt(vod_id) });
+            const item = data?.js?.data?.[0] as any;
+            if (!item) return h.response({ info: {}, movie_data: {} });
+            mapVodItem(item, 1, item.category_id || "0");
+            cached = await xtreamCache.get<any>(cacheKey);
+          }
 
-          // mapVodItem writes vod_info_${item.id} to cache as a side effect
-          mapVodItem(item, 1, item.category_id || "0");
-          const vodInfo = await xtreamCache.get(cacheKey);
-          return h.response(vodInfo || { info: {}, movie_data: {} });
+          if (!cached) return h.response({ info: {}, movie_data: {} });
+
+          const tmdbKey = `tmdb_movie_${vod_id}`;
+          let tmdb = await xtreamCache.get<TmdbMeta | { _not_found: true }>(tmdbKey);
+          if (!tmdb) {
+            const name = cached.movie_data?.name || cached.info?.name || "";
+            const year = cached.info?.releasedate || "";
+            const meta = await fetchMovieMeta(name, year);
+            tmdb = meta ?? { _not_found: true };
+            await xtreamCache.set(tmdbKey, tmdb);
+          }
+
+          if (tmdb && !("_not_found" in tmdb)) {
+            return h.response({
+              ...cached,
+              info: {
+                ...cached.info,
+                cover_big:     tmdb.poster   ?? cached.info?.cover_big,
+                movie_image:   tmdb.poster   ?? cached.info?.movie_image,
+                backdrop_path: tmdb.backdrop ? [tmdb.backdrop] : (cached.info?.backdrop_path ?? []),
+                plot:          tmdb.overview ?? cached.info?.plot,
+              },
+            });
+          }
+          return h.response(cached);
         }
 
         // ── Series ───────────────────────────────────────────────────────────
 
         if (action === "get_series_categories") {
-          const cached = await xtreamCache.get("series_cats");
-          if (cached) return h.response(cached);
-          const genres = await readGenres("series");
-          const result = genres
-            .filter((g: any) => g.id && g.id !== "*")
-            .map((g: any) => ({
-              category_id:   g.id,
-              category_name: g.title,
-              parent_id:     0,
-            }));
-          await xtreamCache.set("series_cats", result);
-          return h.response(result);
+          let raw: any[];
+          const cached = await xtreamCache.get<any[]>("series_cats");
+          if (cached) {
+            raw = cached;
+          } else {
+            const genres = await readGenres("series");
+            raw = genres
+              .filter((g: any) => g.id && g.id !== "*")
+              .map((g: any) => ({
+                category_id:   g.id,
+                category_name: g.title,
+                parent_id:     0,
+              }));
+            await xtreamCache.set("series_cats", raw);
+          }
+          const seriesCats = await applyXtreamCatOverrides(raw, "series");
+          const vs = await getVodVersion();
+          return h.response(seriesCats.map((c: any) => ({ ...c, category_id: addVer(c.category_id, vs) })));
         }
 
         if (action === "get_series") {
-          const { category_id, search } = request.query as Record<string, string>;
+          const { category_id: rawSeriesCatId, search } = request.query as Record<string, string>;
+          const category_id = rawSeriesCatId ? stripVer(rawSeriesCatId) : rawSeriesCatId;
+          const getSeriesCache = (catId: string) =>
+            xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
+          let rawResult: any[];
 
           if (search) {
             const genres = await readGenres("series");
+            const hiddenIds = await getHiddenGenreIds("series");
             const all: any[] = [];
             for (const genre of genres) {
               if (!genre.id || genre.id === "*") continue;
+              if (hiddenIds.has(String(genre.id))) continue;
               const cached = await xtreamCache.get<any[]>(`series_list_${genre.id}`);
               if (cached) all.push(...cached);
             }
             const term = search.toLowerCase();
-            const results = all.filter((s: any) => s.name?.toLowerCase().includes(term));
-            logger.info(`[player_api] get_series search="${search}": ${results.length}`);
-            return h.response(results);
-          }
-
-          if (!category_id) {
+            rawResult = all.filter((s: any) => s.name?.toLowerCase().includes(term));
+            logger.info(`[player_api] get_series search="${search}": ${rawResult.length}`);
+          } else if (!category_id) {
             const genres = await readGenres("series");
+            const hiddenIds = await getHiddenGenreIds("series");
             const all: any[] = [];
             for (const genre of genres) {
               if (!genre.id || genre.id === "*") continue;
+              if (hiddenIds.has(String(genre.id))) continue;
               const cached = await xtreamCache.get<any[]>(`series_list_${genre.id}`);
               if (cached) all.push(...cached);
             }
+            rawResult = all;
             logger.info(`[player_api] get_series (all): ${all.length} series`);
-            return h.response(all);
-          }
-
-          const cacheKey = `series_list_${category_id}`;
-          const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
-          if (cached && !isStale) return h.response(cached);
-
-          const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
-          const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
-
-          if (cached) {
-            // Stale — fetch only new items; stop on first known item (series or movie for Portal A)
-            const existingSeriesIds = new Set(cached.map((s: any) => String(s.series_id)));
-            const existingMovies = isNativeSeries ? null : await xtreamCache.get<any[]>(`vod_streams_${category_id}`);
-            const existingMovieIds = new Set((existingMovies || []).map((m: any) => String(m.stream_id)));
-            const newRaw = await fetchUntilKnown(
-              async (page) => {
-                const res = isNativeSeries
-                  ? await provider.getSeries({ category: category_id, page })
-                  : await provider.getMovies({ category: category_id, page });
-                return res?.js?.data || [];
-              },
-              (item) => existingSeriesIds.has(String(item.id)) || existingMovieIds.has(String(item.id)),
-            );
-            const newItems = isNativeSeries ? newRaw : newRaw.filter((i: any) => i[seriesFlag] == 1);
-            if (newItems.length === 0) {
-              await xtreamCache.set(cacheKey, cached);
-              return h.response(cached);
-            }
-            const result = [
-              ...newItems.map((s, idx) => mapSeriesItem(s, idx + 1, category_id)),
-              ...cached.map((s: any, idx: number) => ({ ...s, num: newItems.length + idx + 1 })),
-            ];
-            await xtreamCache.set(cacheKey, result);
-            return h.response(result);
-          }
-
-          // Cache miss — full fetch
-          let allRaw: any[];
-          let items: any[];
-          if (isNativeSeries) {
-            allRaw = await fetchAllPages(async (page) => {
-              const res = await provider.getSeries({ category: category_id, page });
-              return res?.js?.data || [];
-            });
-            items = allRaw;
+          } else if (category_id.startsWith("vcat_")) {
+            rawResult = [];
           } else {
-            allRaw = await fetchAllPages(async (page) => {
-              const res = await provider.getMovies({ category: category_id, page });
-              return res?.js?.data || [];
-            });
-            items = allRaw.filter((i: any) => i[seriesFlag] == 1);
+            const cacheKey = `series_list_${category_id}`;
+            const { value: cached, isStale } = await xtreamCache.getWithStaleness<any[]>(cacheKey);
+            const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
+            const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
+
+            if (cached && !isStale) {
+              rawResult = cached;
+            } else if (cached) {
+              // Stale — fetch only new items
+              const existingSeriesIds = new Set(cached.map((s: any) => String(s.series_id)));
+              const existingMovies = isNativeSeries ? null : await xtreamCache.get<any[]>(`vod_streams_${category_id}`);
+              const existingMovieIds = new Set((existingMovies || []).map((m: any) => String(m.stream_id)));
+              const newRaw = await fetchUntilKnown(
+                async (page) => {
+                  const res = isNativeSeries
+                    ? await provider.getSeries({ category: category_id, page })
+                    : await provider.getMovies({ category: category_id, page });
+                  return res?.js?.data || [];
+                },
+                (item) => existingSeriesIds.has(String(item.id)) || existingMovieIds.has(String(item.id)),
+              );
+              const newItems = isNativeSeries ? newRaw : newRaw.filter((i: any) => i[seriesFlag] == 1);
+              if (newItems.length === 0) {
+                rawResult = cached;
+                await xtreamCache.set(cacheKey, cached);
+              } else {
+                rawResult = [
+                  ...newItems.map((s, idx) => mapSeriesItem(s, idx + 1, category_id)),
+                  ...cached.map((s: any, idx: number) => ({ ...s, num: newItems.length + idx + 1 })),
+                ];
+                await xtreamCache.set(cacheKey, rawResult);
+              }
+            } else {
+              // Cache miss — full fetch
+              let allRaw: any[];
+              let seriesItems: any[];
+              if (isNativeSeries) {
+                allRaw = await fetchAllPages(async (page) => {
+                  const res = await provider.getSeries({ category: category_id, page });
+                  return res?.js?.data || [];
+                });
+                seriesItems = allRaw;
+              } else {
+                allRaw = await fetchAllPages(async (page) => {
+                  const res = await provider.getMovies({ category: category_id, page });
+                  return res?.js?.data || [];
+                });
+                seriesItems = allRaw.filter((i: any) => i[seriesFlag] == 1);
+              }
+              if (allRaw.length === 0) return h.response([]);
+              rawResult = seriesItems.map((s, idx) => mapSeriesItem(s, idx + 1, category_id));
+              await xtreamCache.set(cacheKey, rawResult);
+            }
           }
-          if (allRaw.length === 0) return h.response([]);
-          const result = items.map((s, idx) => mapSeriesItem(s, idx + 1, category_id));
-          await xtreamCache.set(cacheKey, result);
-          return h.response(result);
+
+          const seriesOverridden = await applySeriesOverrides(rawResult, category_id ?? null, getSeriesCache);
+          const vs = await getVodVersion();
+          return h.response(
+            seriesOverridden.map((item: any) => ({ ...item, category_id: addVer(item.category_id, vs) })),
+          );
         }
 
         if (action === "get_series_info") {
@@ -1165,6 +1307,27 @@ export const xtreamRoutes: ServerRoute[] = [
           };
 
           await xtreamCache.set(cacheKey, result);
+
+          const tmdbKey = `tmdb_tv_${series_id}`;
+          let tmdb = await xtreamCache.get<TmdbMeta | { _not_found: true }>(tmdbKey);
+          if (!tmdb) {
+            const meta = await fetchTVMeta(result.info.name, result.info.releaseDate);
+            tmdb = meta ?? { _not_found: true };
+            await xtreamCache.set(tmdbKey, tmdb);
+          }
+
+          if (tmdb && !("_not_found" in tmdb)) {
+            const enriched = {
+              ...result,
+              info: {
+                ...result.info,
+                cover:         tmdb.poster   ?? result.info.cover,
+                backdrop_path: tmdb.backdrop ? [tmdb.backdrop] : (result.info.backdrop_path ?? []),
+                plot:          tmdb.overview ?? result.info.plot,
+              },
+            };
+            return h.response(enriched);
+          }
           return h.response(result);
         }
 

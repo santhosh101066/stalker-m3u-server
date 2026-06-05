@@ -68,6 +68,19 @@ function decodeBase64Safe(str: string): string {
   return str;
 }
 
+// Xtream portals base64-encode EPG titles; guard against plain-text portals
+function decodeBase64Title(s: string): string {
+  if (!s) return s;
+  // If it contains characters outside the base64 alphabet it's already plain text
+  if (!/^[A-Za-z0-9+/]+=*$/.test(s)) return s;
+  try {
+    const decoded = Buffer.from(s, "base64").toString("utf8");
+    return decoded || s;
+  } catch {
+    return s;
+  }
+}
+
 export class XtreamClient implements IProvider {
   private baseUrl: string;
   private username: string;
@@ -78,7 +91,7 @@ export class XtreamClient implements IProvider {
   private inFlight = new Map<string, Promise<any>>();
 
   constructor() {
-    const protocol = "http";
+    const protocol = initialConfig.https ? "https" : "http";
     this.baseUrl = `${protocol}://${initialConfig.hostname}:${initialConfig.port}`;
     this.username = initialConfig.username || "";
     this.password = initialConfig.password || "";
@@ -191,7 +204,7 @@ export class XtreamClient implements IProvider {
     const channels: Channel[] = data.map((item: any) => ({
       id: item.stream_id,
       name: item.name,
-      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/live/${this.username}/${this.password}/${item.stream_id}.m3u8`,
+      cmd: `${this.baseUrl}/live/${this.username}/${this.password}/${item.stream_id}.m3u8`,
       number: item.num,
       logo: item.stream_icon,
       tv_genre_id: item.category_id,
@@ -222,6 +235,7 @@ export class XtreamClient implements IProvider {
       const data = await this.makeRequest({
         action: "get_short_epg",
         stream_id: channelId,
+        limit: 24,
       });
 
       let listings: any[] = [];
@@ -331,7 +345,7 @@ export class XtreamClient implements IProvider {
     const videos: Video[] = data.map((item: any) => ({
       id: item.stream_id,
       name: item.name,
-      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${item.stream_id}.${item.container_extension}`,
+      cmd: `${this.baseUrl}/movie/${this.username}/${this.password}/${item.stream_id}.${item.container_extension}`,
 
       screenshot_uri: item.stream_icon,
       category_id: item.category_id,
@@ -394,7 +408,7 @@ export class XtreamClient implements IProvider {
     } catch (e) {
       console.error("Error fetching movie container extension:", e);
     }
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${params.id}.${extension}`;
+    const url = `${this.baseUrl}/movie/${this.username}/${this.password}/${params.id}.${extension}`;
 
     return {
       js: {
@@ -509,7 +523,7 @@ export class XtreamClient implements IProvider {
               episodesForSeason.push({
                 id: ep.id,
                 name: ep.title || `Episode ${ep.episode_num}`,
-                cmd: `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
+                cmd: `${this.baseUrl}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
                 screenshot_uri: ep.info?.movie_image || data.info?.cover,
                 category_id: data.info?.category_id,
                 time: duration,
@@ -647,7 +661,7 @@ export class XtreamClient implements IProvider {
     } catch (e) {
       console.error("Error fetching episode container extension:", e);
     }
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${params.id}.${extension}`;
+    const url = `${this.baseUrl}/series/${this.username}/${this.password}/${params.id}.${extension}`;
     return {
       js: {
         cmd: url,
