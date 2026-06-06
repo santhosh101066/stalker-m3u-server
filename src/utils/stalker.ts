@@ -39,7 +39,7 @@ async function httpRequest<T = any>(
     })
     .then((res) => {
       if (res.status !== 200) {
-        throw new Error(`Request failed with status ${res.status}`);
+        throw new Error(`Request failed with status ${res.status} for URL: ${url}`);
       }
       return res.data;
     });
@@ -642,6 +642,19 @@ export class StalkerAPI implements IProvider {
     });
   }
 
+  async getSeriesGroups() {
+    const response = await this.makeRequest<any>(this.getPhpUrl(), {
+      type: "series",
+      action: "get_categories",
+    });
+    // Portal may return { js: [...] } or { js: { data: [...] } }
+    const raw = response?.js;
+    const arr: Genre[] = Array.isArray(raw) ? raw
+      : Array.isArray(raw?.data) ? raw.data
+      : [];
+    return { js: arr } as Data<Genre[]>;
+  }
+
   async getMovies({
     category,
     page,
@@ -723,7 +736,7 @@ export class StalkerAPI implements IProvider {
     download: number;
     cmd?: string;
   }) {
-    const resolvedCmd = cmd || `/media/file_${id}.mpg`;
+    const resolvedCmd = cmd || (initialConfig.contextPath === "" ? String(id) : `/media/file_${id}.mpg`);
     const params = {
       type: "vod",
       action: "create_link",
@@ -736,6 +749,19 @@ export class StalkerAPI implements IProvider {
     };
 
     return this.makeRequest<Data<Programs<Video>>>(this.getPhpUrl(), params);
+  }
+
+  async getVodLinkByCmd(cmd: string, series: number = 0): Promise<any> {
+    return this.makeRequest<any>("/server/load.php", {
+      type: "vod",
+      action: "create_link",
+      cmd,
+      series,
+      force_ch_link_check: "0",
+      disable_ad: "0",
+      download: 0,
+      forced_storage: "",
+    });
   }
 
   async getSeriesLink({
@@ -759,13 +785,6 @@ export class StalkerAPI implements IProvider {
       forced_stop_range: "",
       series: series,
       cmd: resolvedCmd,
-    });
-  }
-
-  async getSeriesGroups() {
-    return this.makeRequest<Data<Genre[]>>(this.getPhpUrl(), {
-      type: "vod",
-      action: "get_categories",
     });
   }
 

@@ -86,6 +86,7 @@ export const proxy: ServerRoute[] = [
           ? Buffer.from(ref, "base64").toString("utf-8")
           : undefined;
 
+        console.log(`[/proxy/stream] ${request.info.remoteAddress} → ${decodedUrl}`);
         return await handleProxyStream(request, h, decodedUrl, referer);
       } catch (error: any) {
         console.error("[/proxy/stream] error:", error.message || error);
@@ -116,6 +117,7 @@ export const proxy: ServerRoute[] = [
           : undefined;
 
         const playlistUrl = assertHttpUrl(decodedUrl).href;
+        console.log(`[/proxy] ${request.info.remoteAddress} → ${playlistUrl}`);
 
         const u = new URL(playlistUrl);
         const pathLower = u.pathname.toLowerCase();

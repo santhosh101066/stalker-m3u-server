@@ -1,37 +1,29 @@
-FROM node:18-alpine
+FROM node:18-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache python3 make g++
 
-# Set Timezone to IST
-
-
-# Set Timezone to IST
-ENV TZ=Asia/Kolkata
-
-# Copy package files
 COPY package*.json ./
+RUN npm ci
 
-# Install dependencies
-RUN npm install
-
-# Copy SQLite database file (if you want to persist the DB image-to-image, otherwise remove this too)
-COPY database.sqlite ./ 
-
-# Copy source code
 COPY . .
-
-# Build the application
 RUN npm run build
 
-# Expose port
-EXPOSE 3000
+RUN npm prune --omit=dev
 
-# Set environment variables
-ENV NODE_ENV=production
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Start the application
-CMD ["npm", "start"]
+FROM node:18-alpine
+
+RUN apk add --no-cache tzdata
+
+WORKDIR /app
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/public ./public
+COPY package.json ./
+
+ENTRYPOINT []
+CMD ["node", "dist/server.js"]

@@ -98,21 +98,6 @@ async function populateCache(cmd: string): Promise<void> {
   await promise;
 }
 
-async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
-  try {
-    const redirectedUrl = await cmdPlayerV2(cmd);
-    if (redirectedUrl) {
-      return h.redirect(redirectedUrl).code(302);
-    }
-    return h
-      .response({ error: "Unable to fetch stream [Non Proxy]" })
-      .code(400);
-  } catch (err) {
-    logger.error(`Non-proxy error: ${err}`);
-    return h.response({ error: "Stream fetch failed" }).code(500);
-  }
-}
-
 async function handleProxy(cmd: string, play: string | undefined, h: any) {
   try {
     if (!cache.get(cmd)) {
@@ -263,6 +248,19 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
   }
 }
 
+async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
+  try {
+    const redirectedUrl = await cmdPlayerV2(cmd);
+    if (redirectedUrl) {
+      return h.redirect(redirectedUrl).code(302);
+    }
+    return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
+  } catch (err) {
+    logger.error(`Non-proxy error: ${err}`);
+    return h.response({ error: "Stream fetch failed" }).code(500);
+  }
+}
+
 export const liveRoutes: ServerRoute[] = [
   {
     method: "GET",
@@ -302,9 +300,7 @@ export const liveRoutes: ServerRoute[] = [
             if (redirectedUrl) {
               return h.redirect(redirectedUrl).code(302);
             }
-            return h
-              .response({ error: "Unable to fetch stream [Non Proxy]" })
-              .code(400);
+            return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
           } catch (err: any) {
             logger.error(`Non-proxy error: ${err.message || err}`);
             return h.response({ error: "Stream fetch failed" }).code(500);

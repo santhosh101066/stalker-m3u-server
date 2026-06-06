@@ -2,11 +2,10 @@
   <img src="public/stalker-logo.svg" alt="Stalker Server Logo" width="200" />
 </p>
 
-<h1 align="center">Stalker Middleware Server</h1>
+<h1 align="center">Stalker M3U Server</h1>
 
 <p align="center">
-  A robust Node.js backend for proxying Stalker/Xtream Codes credentials, generating M3U playlists, 
-  and handling real-time signaling for the Stalker VOD ecosystem.
+  A Node.js middleware that bridges Stalker portals and Xtream Codes sources to any IPTV player — with a full content management layer, Jellyfin integration, and an HLS transcode proxy.
 </p>
 
 <p align="center">
@@ -18,84 +17,122 @@
 
 ---
 
-## ✨ Features
+## What it does
 
-- 🔄 **Smart Proxy**: Securely proxies video streams, hiding upstream credentials from the client.
-- 📋 **Playlist Generation**: Dynamically converts Stalker portal content into standard M3U playlists.
-- 📺 **EPG Support**: Parses and serves Electronic Program Guides (EPG) for live channels.
-- 🔌 **Real-time Signaling**: Socket.io server for handling device casting and remote control commands.
-- 🐳 **Docker Ready**: Fully containerized for easy deployment on Raspberry Pi or any Linux server.
+Connects to a **Stalker portal** or **Xtream Codes API** and re-serves the content in formats your players actually understand — Xtream Codes API, M3U playlists, and XMLTV EPG. On top of raw passthrough it adds a full content management layer, Jellyfin/.strm integration, HLS transcode proxy, and several quality-of-life features.
 
-## 🚀 Quick Start
+**Core features at a glance:**
 
-### Prerequisites
-- Node.js (v18+)
-- Docker (for deployment)
+- **Dual provider support** — Stalker STB portals and Xtream Codes APIs both supported; switch via UI without restart
+- **Xtream Codes API** — full protocol emulation (live, VOD, series, EPG, XMLTV)
+- **M3U + EPG** — standard playlist and XMLTV endpoints
+- **Content Manager** — browser UI to rename, hide, move, and reorder content without touching the portal
+- **Virtual categories** — create custom groupings; move items in from any portal category
+- **Cache warming** — incremental background fetching so players always see fresh content
+- **VOD category versioning** — tricks free IPTV players into re-fetching updated categories on force-refresh
+- **Jellyfin / Emby** — generates `.strm` files with automatic duplicate merging and variant tag detection
+- **HLS transcode proxy** — FFmpeg-based VOD/series proxy with full seek support, multi-audio, and subtitle tracks
+- **TMDB metadata** — optional poster/backdrop enrichment for VOD and series
+- **Profiles** — multiple portal accounts, switchable without restart
+- **Portal type auto-detection** — handles mixed VOD+series portals and native series portals automatically
+- **HTTPS / TLS** — optional TLS termination built in
 
-### Installation
+---
 
-1.  **Clone the repository**
-    ```bash
-    git clone https://github.com/yourusername/stalker-m3u-server.git
-    cd stalker-m3u-server
-    ```
+## Quick Start
 
-2.  **Install dependencies**
-    ```bash
-    npm install
-    ```
-
-3.  **Configure Environment**
-    ```bash
-    cp .env.example .env
-    ```
-    Edit `.env` to configure your deployment target:
-    ```ini
-    REMOTE_HOST=your_raspberry_pi_ip
-    REMOTE_USER=pi
-    REMOTE_DIR=~/stalker-server
-    ```
-
-4.  **Run Development Server**
-    ```bash
-    npm run dev
-    ```
-
-## 🛠️ Deployment
-
-We use a consolidated `deploy.sh` script to manage the Docker lifecycle on your remote host.
-
-### Full Deployment
-Builds the Docker image, saves it, transfers it to the remote host, and restarts the container.
 ```bash
-./deploy.sh
+cp stalker-m3u-server.yml docker-compose.yml
+# edit credentials, then:
+docker compose up -d
 ```
 
-### Management Commands
-- **Restart Container**:
-  ```bash
-  ./deploy.sh restart
-  ```
-- **View Logs**:
-  ```bash
-  ./deploy.sh logs
-  ```
+Open `http://localhost:3000` to configure your portal.
+Open `http://localhost:3000/contentmanager` for the content admin panel.
 
-## 📡 API Endpoints
+---
 
-- `GET /api/playlist/m3u`: Generate M3U playlist for authenticated user.
-- `GET /api/epg`: Retrieve EPG data.
-- `GET /live/*`: Proxy endpoint for live streams.
-- `GET /movie/*`: Proxy endpoint for VOD content.
+## Provider Setup
 
-## ⚠️ Disclaimer
+### Stalker Portal
 
-This server acts as a **middleware proxy only**. It does not host, provide, or distribute any media content or playlists. It is designed to interface with existing, user-provided Stalker or Xtream Codes portals. Users are solely responsible for ensuring they have the legal right to access the content they configure.
+| Variable | Description |
+|----------|-------------|
+| `STALKER_HOST` | Portal hostname (e.g. `portal.example.com`) |
+| `STALKER_PORT` | Portal port (default `80`) |
+| `STALKER_HTTPS` | Set `true` to connect over HTTPS |
+| `STALKER_PATH` | Context path (default `stalker_portal`) |
+| `STALKER_MAC` | Device MAC address for STB emulation |
+| `STALKER_STB` | STB type (default `MAG254`) |
 
-## 🤝 Contributing
+### Xtream Codes API
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Configure via the browser UI at `http://localhost:3000` — set provider type to **Xtream**, then enter your host, username, and password. No environment variables needed; all Xtream credentials are stored per-profile in the database.
 
-## 📄 License
+---
 
-Distributed under the MIT License. See `LICENSE` for more information.
+## Key Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Listen port |
+| `ADMIN_PASSWORD` | `admin` | Content Manager password |
+| `PROXY_SECRET` | — | HMAC secret for signed proxy URLs (required in production) |
+| `JWT_SECRET` | — | JWT secret for API tokens |
+| `SERIES_FLAG` | `is_series` | Field that marks series items on mixed portals where VOD and series share the same endpoint |
+| `VOD_CATEGORY_VERSIONING` | `false` | Set `true` to enable category version suffixes (free player trick) |
+| `STRM_MOVIES_PATH` | — | Output directory for movie `.strm` files |
+| `STRM_SERIES_PATH` | — | Output directory for series `.strm` files |
+| `TMDB_API_READ_TOKEN` | — | TMDB token for poster/backdrop enrichment |
+| `TLS_CERT_PATH` | — | TLS certificate path (enables HTTPS on the server) |
+| `TLS_KEY_PATH` | — | TLS key path |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+
+Full variable reference and all features → **[docs/features.md](docs/features.md)**
+
+---
+
+## Connecting Players
+
+### Xtream Codes (TiviMate, IPTV Smarters, iPlayer, etc.)
+
+| Field | Value |
+|-------|-------|
+| URL | `http://your-server:3000` |
+| Username | *(configured username)* |
+| Password | *(configured password)* |
+
+### M3U / EPG
+
+| | URL |
+|---|---|
+| Live | `http://your-server:3000/playlist.m3u` |
+| VOD | `http://your-server:3000/vod/playlist.m3u` |
+| EPG | `http://your-server:3000/epg.xml` |
+
+### Jellyfin / Emby
+
+Set `STRM_MOVIES_PATH` and `STRM_SERIES_PATH` to directories your media server scans. `.strm` files are automatically generated and updated on every cache warm cycle.
+
+---
+
+## HLS Transcode Proxy
+
+For players that can't handle direct stream URLs (DRM, unusual containers, multi-audio), the built-in FFmpeg proxy at `/api/media/hls/master.m3u8?url=...` transcodes on-the-fly with:
+
+- Full VOD seeking via timestamp-encoded segment URIs
+- Multi-audio track selection (language-labeled)
+- Subtitle track passthrough
+- Session-based FFmpeg process management with idle cleanup
+
+Requires FFmpeg installed in the container (included in the default Docker image).
+
+---
+
+## Disclaimer
+
+Middleware proxy only. Does not host or distribute content. Users are responsible for legal access to their configured portal.
+
+## License
+
+MIT

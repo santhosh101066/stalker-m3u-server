@@ -12,7 +12,7 @@ export class XtreamAPI {
    * Xtream Codes usually runs on the root, e.g. http://host:port/player_api.php
    */
   private getBaseUrl() {
-    const protocol = "http";
+    const protocol = initialConfig.https ? "https" : "http";
     return `${protocol}://${initialConfig.hostname}:${initialConfig.port}`;
   }
 

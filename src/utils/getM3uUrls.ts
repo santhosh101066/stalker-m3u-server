@@ -1,29 +1,69 @@
-import { Channel, Genre, M3U, M3ULine } from "@/types/types";
-import { initialConfig } from "@/config/server";
+import { Channel, M3U, M3ULine } from "@/types/types";
+import { initialConfig, seriesFlag } from "@/config/server";
 import { readChannels, readGenres } from "./storage";
 import { serverManager } from "@/serverManager";
+import { SystemConfig } from "@/models/SystemConfig";
+import {
+  applyGenreOverrides,
+  applyChannelOverrides,
+  applyPortalItemOverrides,
+} from "@/utils/overrides";
+import { xtreamCache } from "@/routes/xtream";
+import { ContentOverride } from "@/models/ContentOverride";
+
+// Cache
+let liveCache: string = "#EXTM3U";
+let vodCache: string = "#EXTM3U";
+let vodCacheTime: number = 0;
+let vodRefreshInProgress: boolean = false;
+let vodRefreshStatus: string = "idle";
+const VOD_CACHE_TTL = 21600000; // 6 hours
+
+export async function loadPlaylistCache(): Promise<void> {
+  try {
+    const live = await SystemConfig.findByPk("playlist_cache");
+    if (live?.value) {
+      liveCache = live.value;
+      console.log("Restored live playlist from DB cache.");
+    }
+    const vod = await SystemConfig.findByPk("vod_cache");
+    if (vod?.value) {
+      vodCache = vod.value;
+      vodCacheTime = Date.now();
+      console.log("Restored VOD cache from DB.");
+    }
+  } catch (e) {
+    console.error("Failed to load playlist cache:", e);
+  }
+}
+
+async function saveToCache(key: string, value: string): Promise<void> {
+  try {
+    await SystemConfig.upsert({ key, value });
+  } catch (e) {
+    console.error(`Failed to save ${key} to cache:`, e);
+  }
+}
 
 function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
+  const logoUrl = channel.logo
+    ? channel.logo.startsWith("http")
+      ? channel.logo
+      : decodeURI(
+          `http://${initialConfig.hostname}:${initialConfig.port}${
+            initialConfig.contextPath !== "" ? "/" + initialConfig.contextPath : ""
+          }/misc/logos/320/${channel.logo}`,
+        )
+    : "";
+
+  const cleanName = channel.name.replaceAll(",", "").replaceAll(" - ", "-");
+
   return {
     title: `TV - ${group}`,
-    name: channel.name.replaceAll(",", "").replaceAll(" - ", "-"),
-    header: `#EXTINF:-1 tvg-id="${channel.id}" tvg-name="${channel.name
-      .replaceAll(",", "")
-      .replaceAll(" - ", "-")}" tvg-logo="${
-      channel.logo
-        ? channel.logo.startsWith("http")
-          ? channel.logo
-          : decodeURI(
-              `http://${initialConfig.hostname}:${initialConfig.port}${
-                initialConfig.contextPath !== ""
-                  ? "/" + initialConfig.contextPath
-                  : ""
-              }/misc/logos/320/${channel.logo}`,
-            )
-        : ""
-    }" group-title="TV - ${group}",${channel.name
-      .replaceAll(",", "")
-      .replaceAll(" - ", "-")}`,
+    name: cleanName,
+    header: `#EXTINF:-1 tvg-id="${channel.id}" tvg-name="${cleanName}"${
+      logoUrl ? ` tvg-logo="${logoUrl}"` : ""
+    } group-title="TV - ${group}",${cleanName}`,
     command: channel.cmd.includes(initialConfig.hostname)
       ? `http://${host}/portal/proxy?url=${encodeURIComponent(
           btoa(channel.cmd.includes(" ") ? (channel.cmd.split(" ").at(1) ?? "") : channel.cmd),
@@ -32,12 +72,18 @@ function channelToM3u(channel: Channel, group: string, host: string): M3ULine {
   };
 }
 
+function matchesGroups(genreTitle: string): boolean {
+  if (!initialConfig.groups || initialConfig.groups.length === 0) return true;
+  return initialConfig.groups.includes(genreTitle);
+}
+
 export async function getPlaylistV2() {
   const genres = await readGenres("channel");
   const allPrograms = await readChannels();
   const m3u = (allPrograms ?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
-    return genre && initialConfig.groups.includes(genre.title);
+    if (!genre) return false;
+    return matchesGroups(genre.title);
   });
   return m3u;
 }
@@ -46,20 +92,33 @@ export async function getM3uV2(host: string) {
   const genres = await readGenres("channel");
   const allPrograms = await readChannels();
 
-  const m3u = (allPrograms ?? [])
+  if (!genres?.length || !allPrograms?.length) {
+    return liveCache;
+  }
+
+  const originalTitleMap = new Map(genres.map((g: any) => [g.id, g.title]));
+  const visibleGenres = await applyGenreOverrides(genres, "channel");
+  const genreMap = new Map(visibleGenres.map((g: any) => [g.id, g]));
+  const visibleChannels = await applyChannelOverrides(allPrograms);
+
+  const m3u = visibleChannels
     .filter((channel) => {
-      const genre = genres.find((r) => r.id === channel.tv_genre_id);
-      return genre && initialConfig.groups.includes(genre.title);
+      const genre = genreMap.get(channel.tv_genre_id);
+      if (!genre) return false;
+      return matchesGroups(originalTitleMap.get(channel.tv_genre_id) ?? genre.title);
     })
     .map((channel) => {
-      const genre = genres.find((r) => r.id === channel.tv_genre_id)!;
+      const genre = genreMap.get(channel.tv_genre_id)!;
       return channelToM3u(channel, genre.title, host);
     })
     .sort(
       (a, b) => a.title.localeCompare(b.title) || a.name.localeCompare(b.name),
     );
 
-  return new M3U(m3u).print(initialConfig);
+  const result = new M3U(m3u).print(initialConfig);
+  liveCache = result;
+  await saveToCache("playlist_cache", result);
+  return result;
 }
 
 export async function getEPGV2() {
@@ -67,7 +126,8 @@ export async function getEPGV2() {
   const allPrograms = await serverManager.getProvider().getChannels();
   const channels = (allPrograms.js.data ?? []).filter((channel) => {
     const genre = genres.find((r) => r.id === channel.tv_genre_id);
-    return genre && initialConfig.groups.includes(genre.title);
+    if (!genre) return false;
+    return matchesGroups(genre.title);
   });
 
   let xmltv = '<?xml version="1.0" encoding="UTF-8"?>\n';
@@ -118,6 +178,143 @@ export async function getEPGV2() {
   xmltv += "</tv>";
   return xmltv;
 }
+
+async function buildVodM3u(host: string): Promise<string> {
+  const groups = await readGenres("movie");
+  const visibleGroups = await applyGenreOverrides(groups, "movie");
+  const m3uLines: any[] = [];
+
+  const getVodCache = (catId: string) =>
+    xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
+  const getSeriesCache = (catId: string) =>
+    xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
+
+  for (const group of visibleGroups) {
+    if (group.id === "*") continue;
+
+    const buildLine = (item: any, isSeries: boolean) => {
+      const rawLogo = (item as any).screenshot_uri || (item as any).stream_icon || (item as any).cover || "";
+      const proto = initialConfig.https ? "https" : "http";
+      const logoUrl = rawLogo
+        ? rawLogo.startsWith("http") ? rawLogo : `${proto}://${initialConfig.hostname}:${initialConfig.port}${rawLogo}`
+        : "";
+      const cleanName = item.name.replaceAll(",", "").replaceAll(" - ", "-");
+      const groupTitle = isSeries ? `Series - ${group.title}` : `VOD - ${group.title}`;
+      m3uLines.push({
+        title: groupTitle,
+        name: cleanName,
+        header: `#EXTINF:-1 tvg-id="${item.id}" tvg-name="${cleanName}"${logoUrl ? ` tvg-logo="${logoUrl}"` : ""} group-title="${groupTitle}",${cleanName}`,
+        command: `http://${host}/api/vod/play?id=${encodeURIComponent(item.id)}&category=${encodeURIComponent(group.id)}`,
+      });
+    };
+
+    if (String(group.id).startsWith("vcat_")) {
+      // Virtual categories have no portal backing — fetch items from ContentOverride + xtreamCache
+      const movedMovies = await ContentOverride.findAll({
+        where: { item_type: "movie", target_category_id: String(group.id) },
+        raw: true,
+      });
+      for (const ov of movedMovies) {
+        if (ov.hidden || !ov.original_category_id) continue;
+        const itemId = ov.item_key.replace("movie_", "");
+        const srcItems = await getVodCache(ov.original_category_id);
+        const srcItem = srcItems.find((i: any) => String(i.stream_id) === itemId);
+        if (!srcItem) continue;
+        buildLine({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name }, false);
+      }
+      const movedSeries = await ContentOverride.findAll({
+        where: { item_type: "series", target_category_id: String(group.id) },
+        raw: true,
+      });
+      for (const ov of movedSeries) {
+        if (ov.hidden || !ov.original_category_id) continue;
+        const itemId = ov.item_key.replace("series_", "");
+        const srcItems = await getSeriesCache(ov.original_category_id);
+        const srcItem = srcItems.find((i: any) => String(i.series_id) === itemId);
+        if (!srcItem) continue;
+        buildLine({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name }, true);
+      }
+      continue;
+    }
+
+    // Collect all pages first so moved-in items are added exactly once per group
+    const allRawMovies: any[] = [];
+    const allRawSeries: any[] = [];
+    let page = 1;
+    while (true) {
+      const result = await serverManager.getProvider().getMovies({ category: group.id, page });
+      if (!result?.js?.data) break;
+      const rawItems = Array.isArray(result.js.data) ? result.js.data : [];
+      if (rawItems.length === 0) break;
+      allRawMovies.push(...rawItems.filter((i: any) => i[seriesFlag] != 1));
+      allRawSeries.push(...rawItems.filter((i: any) => i[seriesFlag] == 1));
+      if (rawItems.length < 14) break;
+      page++;
+    }
+
+    const overriddenMovies = await applyPortalItemOverrides(allRawMovies, "movie", String(group.id), getVodCache);
+    const overriddenSeries = await applyPortalItemOverrides(allRawSeries, "series", String(group.id), getSeriesCache);
+
+    for (const item of overriddenMovies) buildLine(item, false);
+    for (const item of overriddenSeries) buildLine(item, true);
+  }
+
+  return new M3U(m3uLines).print(initialConfig);
+}
+
+export function invalidateVodCache(): void {
+  vodCache = "#EXTM3U";
+  vodCacheTime = 0;
+}
+
+export async function refreshVodCache(host: string) {
+  if (vodRefreshInProgress) {
+    console.log("VOD cache refresh already in progress, skipping...");
+    return;
+  }
+
+  vodRefreshInProgress = true;
+  vodRefreshStatus = "fetching";
+  console.log("Refreshing VOD cache in background...");
+
+  // Run in background, don't await
+  (async () => {
+    try {
+      vodCache = await buildVodM3u(host);
+      vodCacheTime = Date.now();
+      await saveToCache("vod_cache", vodCache);
+      vodRefreshStatus = "complete";
+      console.log("VOD cache refresh complete.");
+    } catch (e) {
+      vodRefreshStatus = `error: ${e instanceof Error ? e.message : String(e)}`;
+      console.error("VOD cache refresh failed:", e);
+    } finally {
+      vodRefreshInProgress = false;
+    }
+  })();
+}
+
+export function getVodRefreshStatus() {
+  return {
+    inProgress: vodRefreshInProgress,
+    status: vodRefreshStatus,
+  };
+}
+
+export async function getVodM3uV2(host: string) {
+  if (vodCache === "#EXTM3U") {
+    refreshVodCache(host);
+    return vodCache;
+  }
+
+  if (Date.now() - vodCacheTime > VOD_CACHE_TTL) {
+    refreshVodCache(host);
+  }
+
+  return vodCache;
+}
+
+
 function formatTimestamp(timestamp: string): string {
   const date = new Date(parseInt(timestamp) * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
