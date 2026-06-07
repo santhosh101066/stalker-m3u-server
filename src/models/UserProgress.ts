@@ -10,6 +10,10 @@ export class UserProgress extends Model {
     userId!: number;
 
     @PrimaryKey
+    @Column(DataType.INTEGER)
+    profileId!: number;
+
+    @PrimaryKey
     @Column(DataType.STRING)
     mediaId!: string;
 

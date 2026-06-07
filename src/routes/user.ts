@@ -1,7 +1,15 @@
 import { ServerRoute } from "@hapi/hapi";
 import { User } from "../models/User";
 import { UserProgress } from "../models/UserProgress";
+import { ConfigProfile } from "../models/ConfigProfile";
 import { authCheck } from "../utils/jwt";
+
+const getActiveProfileId = async () => {
+  const activeProfile = await ConfigProfile.findOne({
+    where: { isActive: true },
+  });
+  return activeProfile?.id || 1;
+};
 
 export const userRoutes: ServerRoute[] = [
   {
@@ -78,8 +86,9 @@ export const userRoutes: ServerRoute[] = [
       }
 
       try {
+        const profileId = await getActiveProfileId();
         const progressRecords = await UserProgress.findAll({
-          where: { userId: userPayload.userId }
+          where: { userId: userPayload.userId, profileId }
         });
         return progressRecords;
       } catch (error) {
@@ -105,8 +114,10 @@ export const userRoutes: ServerRoute[] = [
           return h.response({ error: "Missing mediaId" }).code(400);
         }
 
+        const profileId = await getActiveProfileId();
         await UserProgress.upsert({
           userId: userPayload.userId,
+          profileId,
           mediaId: String(mediaId),
           progress: Number(progress || 0),
           completed: !!completed,
@@ -130,9 +141,10 @@ export const userRoutes: ServerRoute[] = [
       }
 
       try {
-        // Delete all progress
+        const profileId = await getActiveProfileId();
+        // Delete all progress for this profile
         await UserProgress.destroy({
-          where: { userId: userPayload.userId }
+          where: { userId: userPayload.userId, profileId }
         });
 
         // Clear recents
@@ -149,6 +161,32 @@ export const userRoutes: ServerRoute[] = [
         return { success: true };
       } catch (error) {
         console.error("Error clearing history:", error);
+        return h.response({ error: "Internal Server Error" }).code(500);
+      }
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/user/progress/{mediaId}",
+    handler: async (request, h) => {
+      const userPayload = authCheck(request);
+      if (!userPayload) {
+        return h.response({ error: "Unauthorized" }).code(401);
+      }
+
+      try {
+        const { mediaId } = request.params;
+        const profileId = await getActiveProfileId();
+        await UserProgress.destroy({
+          where: {
+            userId: userPayload.userId,
+            profileId,
+            mediaId: String(mediaId),
+          },
+        });
+        return { success: true };
+      } catch (error) {
+        console.error("Error deleting progress:", error);
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },

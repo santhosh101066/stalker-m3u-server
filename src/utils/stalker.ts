@@ -614,10 +614,13 @@ export class StalkerAPI implements IProvider {
           }
           return response;
         } catch (error: any) {
-          const is401 = axios.isAxiosError(error) && error.response?.status === 401;
-          if (is401) {
+          const isAuthError =
+            (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) ||
+            (error instanceof Error && (error.message.includes("401") || error.message.includes("403")));
+
+          if (isAuthError) {
             logger.warn(
-              `[StalkerAPI] HTTP 401 detected for ${endpoint}. Attempt ${attempts}/${maxAttempts}`,
+              `[StalkerAPI] Auth error (401/403) detected for ${endpoint}: ${error.message || error}. Attempt ${attempts}/${maxAttempts}`,
             );
             if (attempts < maxAttempts) {
               if (!this.profileRefreshPromise) {
@@ -768,7 +771,7 @@ export class StalkerAPI implements IProvider {
       action: "create_link",
       force_ch_link_check: "0",
       disable_ad: "0",
-      download: 0,
+      download,
       forced_storage: "",
       series: Number(series),
       cmd: resolvedCmd,

@@ -3,34 +3,48 @@ set -e
 
 # --- Configuration & Flags ---
 if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip comments and empty lines
+    [[ "$line" =~ ^#.*$ ]] || [ -z "$line" ] && continue
+    # Export securely with proper string handling
+    export "$line"
+  done < .env
 fi
 
 # Defaults
 REMOTE_HOST="${REMOTE_HOST:-pi}"
 REMOTE_DIR="/tmp/docker-deploy"
 IMAGE_NAME="${IMAGE_NAME:-stalker-m3u-server}"
-TAR_NAME="$IMAGE_NAME.tar"
 USE_SUDO=""
 PLATFORM_FLAG="" # Default architecture
+IS_BETA=false
+PORT="3000"
 
 # --- Argument Parsing ---
 for arg in "$@"; do
   case $arg in
+    --beta)
+      IS_BETA=true
+      ;;
     --sudo)
       USE_SUDO="sudo"
-      shift
       ;;
     --arch=*)
       ARCH="${arg#*=}"
       PLATFORM_FLAG="--platform $ARCH"
-      shift
       ;;
     deploy|restart|logs)
       COMMAND="$arg"
       ;;
   esac
 done
+
+if [ "$IS_BETA" = true ]; then
+  IMAGE_NAME="stalker-m3u-server-beta"
+  PORT="3001"
+  echo "⚠️ Running in BETA mode (Port: $PORT, Container: $IMAGE_NAME)"
+fi
+TAR_NAME="$IMAGE_NAME.tar"
 
 COMMAND="${COMMAND:-deploy}"
 
@@ -71,7 +85,7 @@ function deploy_remote() {
     rm "$TAR_NAME"
 
     echo "🚀 Starting container..."
-    $USE_SUDO docker run -d --restart=always -p 3000:3000 --name "$IMAGE_NAME" "$IMAGE_NAME"
+    $USE_SUDO docker run -d --restart=always -p $PORT:3000 --name "$IMAGE_NAME" "$IMAGE_NAME"
     
     echo "🧹 Cleaning up old images..."
     $USE_SUDO docker image prune -f

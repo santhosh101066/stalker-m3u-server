@@ -84,6 +84,7 @@ const init = async () => {
       path.startsWith("/api/proxy") ||
       path.startsWith("/api/media/") ||
       path.startsWith("/api/vod/") ||
+      path.startsWith("/api/v2/download") ||
       path.startsWith("/live.m3u8") ||
       path.startsWith("/player/") ||
       path.startsWith("/live/") ||

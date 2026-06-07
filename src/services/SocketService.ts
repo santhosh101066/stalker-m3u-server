@@ -83,6 +83,10 @@ class SocketService {
         },
       );
 
+      socket.on("get_active_devices", () => {
+        socket.emit("active_devices_list", Array.from(this.devices.values()));
+      });
+
       socket.on("disconnect", () => {
         const device = this.devices.get(socket.id);
         if (device) {
@@ -127,7 +131,9 @@ class SocketService {
 
   private broadcastActiveUserCount() {
     const count = this.devices.size;
+    const list = Array.from(this.devices.values());
     this.io?.emit("active_user_count", count);
+    this.io?.emit("active_devices_updated", list);
   }
 
   public broadcastLog(level: string, message: string, timestamp: string) {

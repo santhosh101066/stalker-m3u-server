@@ -120,7 +120,7 @@ export class XtreamClient implements IProvider {
           Accept: "*/*",
           "Accept-Encoding": "gzip, deflate, br",
         },
-        timeout: 30000, // 30 s — prevents server hang on slow/dead upstream
+        timeout: 120000, // 120 s — prevents server timeout on massive upstream payloads
       })
       .then((response) => {
         this.cache.set(cacheKey, response.data);
