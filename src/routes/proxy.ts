@@ -45,6 +45,14 @@ export async function handleProxyStream(
   } as any);
 
   const stream = response.data as http.IncomingMessage;
+
+  // Clean up upstream connection if client aborts/disconnects
+  request.raw.req.on("close", () => {
+    if (stream && !stream.destroyed) {
+      stream.destroy();
+    }
+  });
+
   const hapiResponse = h.response(stream).code(response.status);
 
   const headersToCopy = [
