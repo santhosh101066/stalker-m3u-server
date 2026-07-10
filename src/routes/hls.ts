@@ -1,5 +1,5 @@
 import { ServerRoute } from "@hapi/hapi";
-import { spawn, exec, ChildProcess } from "child_process";
+import { spawn, execFile, ChildProcess } from "child_process";
 import { promisify } from "util";
 import NodeCache from "node-cache";
 import { logger } from "@/utils/logger";
@@ -7,7 +7,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Cache ffprobe metadata for 6 hours
 const metadataCache = new NodeCache({ stdTTL: 21600, checkperiod: 600 });
@@ -24,6 +24,7 @@ interface MediaTrack {
 
 interface MediaMetadata {
   duration: number;
+  videoCodec: string;
   audio: MediaTrack[];
   subtitles: MediaTrack[];
 }
@@ -75,15 +76,25 @@ async function probeMetadata(url: string): Promise<MediaMetadata> {
   if (cached) return cached;
 
   logger.info(`[HLS] Probing: ${url}`);
-  const cmd = `ffprobe -user_agent "VLC/3.0.16 LibVLC/3.0.16" -probesize 5000000 -analyzeduration 2000000 -v quiet -print_format json -show_format -show_streams "${url}"`;
-  const { stdout } = await execAsync(cmd, { timeout: 15_000 });
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-user_agent", "VLC/3.0.16 LibVLC/3.0.16",
+    "-probesize", "5000000",
+    "-analyzeduration", "2000000",
+    "-v", "quiet",
+    "-print_format", "json",
+    "-show_format",
+    "-show_streams",
+    url,
+  ], { timeout: 15_000 });
   const data = JSON.parse(stdout);
 
   const duration = parseFloat(data.format?.duration || "0");
+  let videoCodec = "";
   const audio: MediaTrack[] = [];
   const subtitles: MediaTrack[] = [];
 
   (data.streams || []).forEach((s: any) => {
+    if (s.codec_type === "video" && !videoCodec) videoCodec = s.codec_name || "";
     const t: MediaTrack = {
       index: s.index,
       codec_name: s.codec_name || "",
@@ -95,7 +106,7 @@ async function probeMetadata(url: string): Promise<MediaMetadata> {
     else if (t.codec_type === "subtitle") subtitles.push(t);
   });
 
-  const meta: MediaMetadata = { duration, audio, subtitles };
+  const meta: MediaMetadata = { duration, videoCodec, audio, subtitles };
   metadataCache.set(url, meta);
   return meta;
 }
@@ -224,8 +235,14 @@ function spawnFFmpeg(
   args.push("-map", "0:v:0");
   metadata.audio.forEach((_, i) => args.push("-map", `0:a:${i}`));
 
-  // Video: stream copy (zero CPU)
-  args.push("-c:v", "copy");
+  // Video: transcode HEVC → H.264 for browser compatibility; stream-copy everything else
+  const isHevc = ["hevc", "h265"].includes(metadata.videoCodec.toLowerCase());
+  if (isHevc) {
+    args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
+    logger.info(`[HLS] HEVC detected — transcoding to H.264`);
+  } else {
+    args.push("-c:v", "copy");
+  }
 
   // Audio: transcode each track to AAC stereo 128k
   metadata.audio.forEach((_, i) => {

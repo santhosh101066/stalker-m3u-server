@@ -1,6 +1,9 @@
 import crypto from "crypto";
 
-const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable must be set");
+}
 
 export function createJWT(payload: any, expiresInSeconds?: number): string {
   const head = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');

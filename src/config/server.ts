@@ -1,10 +1,29 @@
+import fs from "fs";
 import { AppConfig, Config } from "@/types/types";
 import { ConfigProfile } from "@/models/ConfigProfile";
 import { Token } from "@/models/Token";
+import { logger } from "@/utils/logger";
+
+function buildTlsConfig() {
+  const cert = process.env.TLS_CERT_PATH;
+  const key = process.env.TLS_KEY_PATH;
+  if (!cert || !key) return undefined;
+  try {
+    return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
+  } catch (e) {
+    logger.error(`[TLS] Failed to load cert/key: ${e}`);
+    return undefined;
+  }
+}
+
+const tlsConfig = buildTlsConfig();
+
+export const serverProtocol: "http" | "https" = tlsConfig ? "https" : "http";
 
 export const serverConfig = {
   host: "0.0.0.0",
   port: 3000,
+  ...(tlsConfig ? { tls: tlsConfig } : {}),
   routes: {
     cors: { origin: ["*"] },
     state: {
@@ -17,13 +36,14 @@ export const serverConfig = {
 const ConfigDefault: Config = {
   hostname: process.env.STALKER_HOST || "portal.example.com",
   port: Number(process.env.STALKER_PORT) || 80,
+  https: process.env.STALKER_HTTPS === "true",
   contextPath: process.env.STALKER_PATH || "stalker_portal",
   mac: process.env.STALKER_MAC || "00:1A:79:00:00:00",
   stbType: process.env.STALKER_STB || "MAG254",
   groups: [],
   proxy: false,
   tokens: [],
-  playCensored: false,
+  playCensored: process.env.PLAY_CENSORED === "true",
   providerType: "stalker",
   username: "user",
   password: "password",
@@ -35,7 +55,7 @@ if (process.env.NODE_ENV === "production" && !proxySecret) {
     "FATAL: PROXY_SECRET environment variable is required in production mode.",
   );
 } else if (!proxySecret) {
-  console.warn("WARNING: PROXY_SECRET not set, using insecure default.");
+  logger.warn("WARNING: PROXY_SECRET not set, using insecure default.");
 }
 
 const AppConfigDefault: AppConfig = {
@@ -56,6 +76,11 @@ const AppConfigDefault: AppConfig = {
 export const initialConfig: Config = { ...ConfigDefault };
 export const appConfig: AppConfig = { ...AppConfigDefault };
 
+// Field name on VOD items that marks them as series (value == 1 means series)
+export const seriesFlag = process.env.SERIES_FLAG || "is_series";
+
+export const tmdbApiToken = process.env.TMDB_API_READ_TOKEN || "";
+
 export function getInitialConfig() {
   return initialConfig;
 }
@@ -68,7 +93,7 @@ export async function migrateToProfiles() {
   try {
     const existingProfiles = await ConfigProfile.count();
     if (existingProfiles === 0) {
-      console.log("No profiles found. Creating default profile...");
+      logger.info("No profiles found. Creating default profile...");
       await ConfigProfile.create({
         name: "Default Profile",
         description: "Initialized from defaults",
@@ -76,10 +101,10 @@ export async function migrateToProfiles() {
         isActive: true,
         isEnabled: true,
       });
-      console.log("✅ Migration complete: Created 'Default Profile'");
+      logger.info("✅ Migration complete: Created 'Default Profile'");
     }
   } catch (err) {
-    console.error("Error during profile migration:", err);
+    logger.error({ err }, "Error during profile migration");
   }
 }
 
@@ -91,17 +116,17 @@ export async function loadActiveProfileFromDB() {
     if (activeProfile) {
       Object.assign(initialConfig, activeProfile.config);
 
-      console.log(`✅ Loaded active profile: "${activeProfile.name}"`);
+      logger.info(`✅ Loaded active profile: "${activeProfile.name}"`);
 
       const tokens = await Token.findAll();
       initialConfig.tokens = tokens.map((t) => t.token);
-      console.log(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
+      logger.info(`Loaded ${initialConfig.tokens.length} tokens from DB.`);
     } else {
-      console.warn("⚠️ No active profile found. Using defaults.");
+      logger.warn("⚠️ No active profile found. Using defaults.");
       Object.assign(initialConfig, ConfigDefault);
     }
   } catch (err) {
-    console.error("Error loading active profile from DB:", err);
+    logger.error({ err }, "Error loading active profile from DB");
   }
 }
 
@@ -117,11 +142,11 @@ export async function switchProfile(profileId: number) {
     profile.isActive = true;
     await profile.save();
 
-    console.log(`✅ Switched to profile: "${profile.name}"`);
+    logger.info(`✅ Switched to profile: "${profile.name}"`);
     await loadActiveProfileFromDB();
     return profile;
   } catch (err) {
-    console.error("Error switching profile:", err);
+    logger.error({ err }, "Error switching profile");
     throw err;
   }
 }
@@ -141,10 +166,10 @@ export async function saveProfileToDB(profileData: {
       isEnabled:
         profileData.isEnabled !== undefined ? profileData.isEnabled : true,
     });
-    console.log(`✅ Created profile: "${profile.name}"`);
+    logger.info(`✅ Created profile: "${profile.name}"`);
     return profile;
   } catch (err) {
-    console.error("Error saving profile to DB:", err);
+    logger.error({ err }, "Error saving profile to DB");
     throw err;
   }
 }

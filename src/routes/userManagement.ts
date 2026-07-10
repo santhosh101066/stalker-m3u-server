@@ -1,4 +1,5 @@
 import { ServerRoute } from "@hapi/hapi";
+import { logger } from "@/utils/logger";
 import { User } from "../models/User";
 import { authCheck } from "../utils/jwt";
 import { hashPassword } from "../utils/password";
@@ -20,7 +21,7 @@ export const userManagementRoutes: ServerRoute[] = [
         });
         return users;
       } catch (error) {
-        console.error("Error listing users:", error);
+        logger.error({ err: error }, "Error listing users");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -76,7 +77,7 @@ export const userManagementRoutes: ServerRoute[] = [
         delete resUser.salt;
         return resUser;
       } catch (error) {
-        console.error("Error creating user:", error);
+        logger.error({ err: error }, "Error creating user");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -132,7 +133,7 @@ export const userManagementRoutes: ServerRoute[] = [
         // Trigger the approval email if the status changed from inactive to active
         if (isNewlyApproved) {
           sendUserApprovedEmail(user.name, user.email).catch(err => {
-            console.error("Failed to send user approval email after admin update:", err);
+            logger.error({ err }, "Failed to send user approval email after admin update");
           });
         }
 
@@ -141,7 +142,7 @@ export const userManagementRoutes: ServerRoute[] = [
         delete resUser.salt;
         return resUser;
       } catch (error) {
-        console.error("Error updating user:", error);
+        logger.error({ err: error }, "Error updating user");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -171,7 +172,7 @@ export const userManagementRoutes: ServerRoute[] = [
         await user.destroy();
         return { success: true, message: "User deleted successfully" };
       } catch (error) {
-        console.error("Error deleting user:", error);
+        logger.error({ err: error }, "Error deleting user");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },

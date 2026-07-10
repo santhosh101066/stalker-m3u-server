@@ -18,5 +18,144 @@
 
   <body>
     <div id="root"></div>
+    <script>
+      (function () {
+        var BTN_ID = "sms-dl-btn";
+        var MENU_ID = "sms-dl-menu";
+
+        function getToken() {
+          return localStorage.getItem("auth_token");
+        }
+
+        function downloadBlob(blob, filename) {
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () {
+            URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+          }, 100);
+        }
+
+        async function fetchPlaylist(type) {
+          var token = getToken();
+          var filename = type === "vod" ? "vod.m3u" : "iptv.m3u";
+          try {
+            var res = await fetch("/api/v2/playlist-download?type=" + type, {
+              headers: token ? { Authorization: "Bearer " + token } : {},
+            });
+            if (!res.ok) {
+              alert("Download failed (" + res.status + "). Make sure you are logged in.");
+              return;
+            }
+            var blob = await res.blob();
+            downloadBlob(blob, filename);
+          } catch (e) {
+            alert("Download error: " + e.message);
+          }
+        }
+
+        function closeMenu() {
+          var m = document.getElementById(MENU_ID);
+          if (m) m.style.display = "none";
+        }
+
+        function init() {
+          if (document.getElementById(BTN_ID)) return;
+
+          var btn = document.createElement("button");
+          btn.id = BTN_ID;
+          btn.title = "Download Playlist";
+          btn.style.cssText = [
+            "position:fixed",
+            "bottom:24px",
+            "left:24px",
+            "z-index:99998",
+            "display:flex",
+            "align-items:center",
+            "gap:6px",
+            "padding:8px 14px",
+            "border-radius:9999px",
+            "border:1px solid rgba(255,255,255,0.15)",
+            "background:rgba(11,17,32,0.9)",
+            "color:#e2e8f0",
+            "font-size:13px",
+            "font-weight:600",
+            "cursor:pointer",
+            "white-space:nowrap",
+            "box-shadow:0 4px 16px rgba(0,0,0,0.5)",
+          ].join(";");
+          btn.innerHTML =
+            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+            'Download';
+          btn.onmouseover = function () { btn.style.background = "rgba(255,255,255,0.12)"; };
+          btn.onmouseout = function () { btn.style.background = "rgba(11,17,32,0.9)"; };
+
+          var menu = document.createElement("div");
+          menu.id = MENU_ID;
+          menu.style.cssText = [
+            "display:none",
+            "position:fixed",
+            "bottom:68px",
+            "left:24px",
+            "z-index:99999",
+            "background:#1e293b",
+            "border:1px solid #334155",
+            "border-radius:10px",
+            "overflow:hidden",
+            "box-shadow:0 8px 24px rgba(0,0,0,0.6)",
+            "min-width:200px",
+          ].join(";");
+
+          [
+            { label: "Live Playlist (.m3u)", type: "live" },
+            { label: "VOD Playlist (.m3u)", type: "vod" },
+          ].forEach(function (item) {
+            var row = document.createElement("button");
+            row.textContent = item.label;
+            row.style.cssText = [
+              "display:block",
+              "width:100%",
+              "padding:12px 18px",
+              "background:none",
+              "border:none",
+              "color:#e2e8f0",
+              "text-align:left",
+              "cursor:pointer",
+              "font-size:14px",
+              "font-family:inherit",
+              "transition:background 0.1s",
+            ].join(";");
+            row.onmouseover = function () { row.style.background = "#334155"; };
+            row.onmouseout = function () { row.style.background = "none"; };
+            row.onclick = function (e) {
+              e.stopPropagation();
+              closeMenu();
+              fetchPlaylist(item.type);
+            };
+            menu.appendChild(row);
+          });
+
+          btn.onclick = function (e) {
+            e.stopPropagation();
+            var m = document.getElementById(MENU_ID);
+            m.style.display = m.style.display === "none" ? "block" : "none";
+          };
+
+          document.addEventListener("click", closeMenu);
+          document.body.appendChild(btn);
+          document.body.appendChild(menu);
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", init);
+        } else {
+          init();
+        }
+      })();
+    </script>
   </body>
 </html>

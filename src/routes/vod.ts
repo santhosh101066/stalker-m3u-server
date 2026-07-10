@@ -9,22 +9,43 @@ export const vodRoutes: ServerRoute[] = [
     method: "GET",
     path: "/api/vod/play",
     handler: async (request, h) => {
-      const { cmd, url } = request.query as {
-        cmd: string;
+      const { cmd, url, id, series = "", category = "0" } = request.query as {
+        cmd?: string;
         url?: string;
+        id?: string;
+        series?: string;
+        category?: string;
       };
 
-      if (!cmd) {
-        return h.response({ error: "Missing cmd parameter" }).code(400);
+      if (!cmd && !id) {
+        return h
+          .response({ error: "Missing cmd or id parameter" })
+          .code(400);
       }
 
       let streamUrl = url;
       if (!streamUrl) {
         try {
-          const linkResult = await serverManager
-            .getProvider()
-            .getChannelLink(cmd);
-          streamUrl = linkResult?.js?.cmd;
+          if (cmd) {
+            const linkResult = await serverManager
+              .getProvider()
+              .getChannelLink(cmd);
+            streamUrl = linkResult?.js?.cmd;
+          } else if (id) {
+            const itemId = Number(id);
+            if (Number.isNaN(itemId)) {
+              return h
+                .response({ error: "Invalid id parameter" })
+                .code(400);
+            }
+
+            const linkResult = await serverManager.getProvider().getMovieLink({
+              series,
+              id:       itemId,
+              download: 0,
+            });
+            streamUrl = linkResult?.js?.cmd;
+          }
         } catch (e) {
           logger.error(`Error resolving stream URL: ${e}`);
         }
@@ -35,6 +56,11 @@ export const vodRoutes: ServerRoute[] = [
       }
 
       logger.info(`[VOD Proxy] Streaming: ${streamUrl}`);
+
+      if (streamUrl.includes(".m3u8")) {
+        const b64url = Buffer.from(streamUrl).toString("base64");
+        return h.redirect(`/api/proxy?url=${b64url}`);
+      }
 
       const userAgent =
         initialConfig.providerType === "xtream"

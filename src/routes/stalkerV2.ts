@@ -1,21 +1,35 @@
 import { ServerRoute } from "@hapi/hapi";
-import { initialConfig } from "@/config/server";
-import { serverManager } from "@/serverManager";
-import axios from "axios";
 import {
-  readGenres,
-  writeGenres,
+  writeJSON,
   readChannels,
   writeChannels,
+  readGenres,
+  writeGenres,
+  upsertGenres,
 } from "@/utils/storage";
+import { initialConfig, seriesFlag } from "@/config/server";
+import { serverManager } from "@/serverManager";
+import axios from "axios";
 import { ConfigProfile } from "@/models/ConfigProfile";
 import { ContentCache } from "@/models/ContentCache";
 import { stalkerApi } from "@/utils/stalker";
 import { Readable } from "stream";
+import { XtreamCache } from "@/models/XtreamCache";
+import { ContentOverride } from "@/models/ContentOverride";
+import { warmVodCache, warmSeriesCache, warmSeriesInfoCache, cleanupGenres, catchupScan, xtreamCache } from "@/routes/xtream";
+import { logger } from "@/utils/logger";
+import {
+  applyGenreOverrides,
+  applyChannelOverrides,
+  applyPortalItemOverrides,
+} from "@/utils/overrides";
 import crypto from "crypto";
-import { getEpgCache } from "@/utils/epg";
+import { getEpgCache, fetchAndCacheEpg } from "@/utils/epg";
+import { getPublicOrigin } from "@/utils/publicUrl";
+import { getM3uV2, getVodM3uV2 } from "@/utils/getM3uUrls";
+import { channelLogoPath, proxiedLogoPath } from "@/utils/portalAssets";
 
-const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // Exact 4 Hours Configuration Window
+const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 const resolveStalkerUrl = (stalker: any, urlPath: string): string => {
   if (!urlPath) return "";
@@ -65,15 +79,20 @@ const generateCacheKey = (type: string, queryParams: any): string => {
   return `${type}_${crypto.createHash("md5").update(sortedString).digest("hex")}`;
 };
 
-const mapChannel = (channel: any) => {
+// origin is the public base URL of this server (reverse-proxy aware), so the
+// returned cmd is a complete playable URL that can be copied into any player.
+const mapChannel = (channel: any, origin: string) => {
   let cmdUrl = channel.cmd;
+  let logo = channel.logo || channel.screenshot_uri || "";
   if (initialConfig.providerType === "stalker") {
-    cmdUrl = `/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`;
+    cmdUrl = `${origin}/live.m3u8?cmd=${encodeURIComponent(channel.cmd)}&id=${channel.id}&proxy=1`;
+    // Frontend prefixes non-http values with /api/images — hand it a portal-root path
+    logo = channelLogoPath(logo);
   }
   return {
     ...channel,
     cmd: cmdUrl,
-    screenshot_uri: channel.logo || channel.screenshot_uri || "",
+    screenshot_uri: logo,
     isPortal: initialConfig.providerType === "stalker",
   };
 };
@@ -85,7 +104,8 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const { slug } = request.params;
-        const targetUrl = `http://${initialConfig.hostname}:${initialConfig.port}/${slug}`;
+        const proto = initialConfig.https ? "https" : "http";
+        const targetUrl = `${proto}://${initialConfig.hostname}:${initialConfig.port}/${slug}`;
         const response = await fetch(targetUrl);
 
         if (!response.ok || !response.body) {
@@ -103,7 +123,7 @@ export const stalkerV2: ServerRoute[] = [
           .type(contentType)
           .header("cache-control", "max-age=3600");
       } catch (err) {
-        console.error("Piping error:", err);
+        logger.error({ err }, "Piping error");
         return h
           .response({ success: false, error: "An unexpected error occurred." })
           .code(500);
@@ -123,7 +143,7 @@ export const stalkerV2: ServerRoute[] = [
         await writeGenres(filteredCategory, "channel", profileId);
         return filteredCategory;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to refresh groups." })
           .code(500);
@@ -147,14 +167,17 @@ export const stalkerV2: ServerRoute[] = [
           return groups;
         }
 
-        const filteredGroups = groups.filter(
-          (group) =>
-            initialConfig.groups.length === 0 ||
-            initialConfig.groups.includes(group.title),
+        const filteredGroups = await applyGenreOverrides(
+          groups.filter(
+            (group) =>
+              initialConfig.groups.length === 0 ||
+              initialConfig.groups.includes(group.title),
+          ),
+          "channel",
         );
         return filteredGroups;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve groups." })
           .code(500);
@@ -173,7 +196,8 @@ export const stalkerV2: ServerRoute[] = [
             initialConfig.playCensored || String(channel.censored) !== "1",
         );
         await writeChannels(filteredChannels, profileId);
-        const mappedChannels = filteredChannels.map(mapChannel);
+        const origin = getPublicOrigin(request);
+        const mappedChannels = filteredChannels.map((c) => mapChannel(c, origin));
         const genres = await readGenres("channel", profileId);
         if (genres.length === 0) {
           return mappedChannels ?? [];
@@ -189,7 +213,7 @@ export const stalkerV2: ServerRoute[] = [
           );
         });
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to refresh channels." })
           .code(500);
@@ -207,22 +231,19 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/refresh-channels");
         }
         const genres = await readGenres("channel", profileId);
-        const mapped = (channels ?? []).map(mapChannel);
-        if (genres.length === 0) {
-          return mapped.sort((a, b) => a.name.localeCompare(b.name));
-        }
-        return mapped
-          .filter((channel) => {
-            const genre = genres.find((r) => r.id === channel.tv_genre_id);
-            return (
-              genre &&
-              (initialConfig.groups.length === 0 ||
-                initialConfig.groups.includes(genre.title))
-            );
-          })
+        const originalTitleMap = new Map(genres.map((g: any) => [g.id, g.title]));
+        const visibleGenres = await applyGenreOverrides(genres, "channel");
+        const visibleGenreIds = new Set(visibleGenres.map((g: any) => g.id));
+        const overriddenChannels = await applyChannelOverrides(channels);
+        const origin = getPublicOrigin(request);
+        return overriddenChannels
+          .filter((channel) => visibleGenreIds.has(channel.tv_genre_id) &&
+            (initialConfig.groups.length === 0 ||
+              initialConfig.groups.includes(originalTitleMap.get(channel.tv_genre_id) ?? "")))
+          .map((channel) => mapChannel(channel, origin))
           .sort((a, b) => a.name.localeCompare(b.name));
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve channels." })
           .code(500);
@@ -236,13 +257,16 @@ export const stalkerV2: ServerRoute[] = [
       try {
         const profileId = await getActiveProfileId();
         const groups = await serverManager.getProvider().getMoviesGroups();
-        const filteredChannels = groups.js.filter(
-          (channel) => initialConfig.playCensored || channel.censored != 1,
+        const allCats = (Array.isArray(groups.js) ? groups.js : []).filter(
+          (ch: any) => initialConfig.playCensored || ch.censored != 1,
         );
-        await writeGenres(filteredChannels, "movie", profileId);
-        return filteredChannels;
+
+        await upsertGenres(allCats, "movie", profileId);
+        await xtreamCache.delete("vod_cats");
+        warmVodCache().catch((e) => logger.error({ err: e }, "[warm-xtream-vod]"));
+        return allCats;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -269,12 +293,12 @@ export const stalkerV2: ServerRoute[] = [
           total_items: channels.length,
           actual_length: channels.length,
           total_loaded: channels.length,
-          data: channels.sort((a, b) => a.title.localeCompare(b.title)),
+          data: await applyGenreOverrides(channels, "movie"),
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -295,7 +319,7 @@ export const stalkerV2: ServerRoute[] = [
         );
         return { success: true, data: filteredChannels };
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to reset movies." })
           .code(500);
@@ -322,23 +346,51 @@ export const stalkerV2: ServerRoute[] = [
           return h.redirect("/api/v2/movie-groups");
         }
 
-        // Generate custom parameter key hash
+        const itemsPerApiPage = 14;
+        const startApiPage = Number(page);
         const cacheKey = generateCacheKey("movies", query);
+        const getVodCache = (catId: string) =>
+          xtreamCache.get<any[]>(`vod_streams_${catId}`).then((v) => v ?? []);
 
-        // Skip cache checks if live filter operations are targeted
-        if (!search) {
-          const cachedRecord = await ContentCache.findOne({
-            where: { profileId, cacheKey },
-          });
-
+        // ContentCache check — skip if searching or drilling into a specific item
+        if (!search && Number(movieId) === 0) {
+          const cachedRecord = await ContentCache.findOne({ where: { profileId, cacheKey } });
           if (cachedRecord && new Date() < cachedRecord.expiresAt) {
             return cachedRecord.response;
           }
         }
 
-        const itemsPerApiPage = 14;
-        let sortParam = query.sort === "alphabetic" ? "name" : "added";
+        // Virtual categories — serve from xtreamCache overrides
+        if (String(category).startsWith("vcat_") && Number(movieId) === 0) {
+          const movedIn = await ContentOverride.findAll({
+            where: { item_type: "movie", target_category_id: String(category) },
+            raw: true,
+          });
+          const allItems: any[] = [];
+          for (const ov of movedIn) {
+            if (ov.hidden || !ov.original_category_id) continue;
+            const itemId = ov.item_key.replace("movie_", "");
+            const srcItems = (await xtreamCache.get<any[]>(`vod_streams_${ov.original_category_id}`)) ?? [];
+            const srcItem = srcItems.find((i: any) => String(i.stream_id) === itemId);
+            if (!srcItem) continue;
+            allItems.push({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name });
+          }
+          const offset = (startApiPage - 1) * itemsPerApiPage;
+          const pageData = allItems.slice(offset, offset + itemsPerApiPage);
+          return h.response({
+            success: true,
+            page: Number(page),
+            pageAtaTime: 1,
+            total_items: allItems.length,
+            actual_length: itemsPerApiPage,
+            total_loaded: pageData.length,
+            data: pageData,
+            errors: false,
+            isPortal: initialConfig.providerType === "stalker",
+          });
+        }
 
+        const sortParam = query.sort === "alphabetic" ? "name" : "added";
         const res = await serverManager.getProvider().getMovies({
           category,
           page: Number(page),
@@ -354,8 +406,7 @@ export const stalkerV2: ServerRoute[] = [
           const isSeasonContext = !!seasonId && !episodeId;
           const isSeriesContext = !!movieId && !seasonId && !episodeId;
           res.js.data = res.js.data.map((item: any) => {
-            const isEpisode =
-              isSeasonContext || !!item.series_number || item.is_episode;
+            const isEpisode = isSeasonContext || !!item.series_number || item.is_episode;
             const isSeason = isSeriesContext && !isEpisode;
             return {
               ...item,
@@ -365,10 +416,55 @@ export const stalkerV2: ServerRoute[] = [
           });
         }
 
-        let firstPageData =
-          res && res.js && Array.isArray(res.js.data) ? res.js.data : [];
-        const actualTotalItems =
-          (res && res.js && Number(res.js.total_items)) ?? 0;
+        let firstPageData = res?.js?.data ?? [];
+
+        // At top level exclude series so only movies show
+        if (Number(movieId) === 0) {
+          firstPageData = firstPageData.filter((item: any) => item[seriesFlag] != 1);
+        }
+
+        // Page 1 all-series fallback — use warm cache
+        if (Number(movieId) === 0 && firstPageData.length === 0 && res?.js?.data?.length > 0) {
+          const cachedMovies = await xtreamCache.get<any[]>(`vod_streams_${category}`);
+          if (cachedMovies && cachedMovies.length > 0) {
+            const allNormalized = cachedMovies.map((m: any) => ({ ...m, id: String(m.stream_id) }));
+            const allOverridden = await applyPortalItemOverrides(allNormalized, "movie", String(category), getVodCache);
+            const offset = (startApiPage - 1) * itemsPerApiPage;
+            const pageData = allOverridden.slice(offset, offset + itemsPerApiPage);
+            return {
+              success: true,
+              page: Number(page),
+              pageAtaTime: 1,
+              total_items: allOverridden.length,
+              actual_length: itemsPerApiPage,
+              total_loaded: pageData.length,
+              data: pageData,
+              errors: false,
+              isPortal: initialConfig.providerType === "stalker",
+            };
+          }
+        }
+
+        // For episode-level requests refresh cmd via create_link (stale CDN URLs)
+        if (Number(episodeId) > 0) {
+          for (const item of firstPageData as any[]) {
+            try {
+              const link = await serverManager.getProvider().getMovieLink({
+                series: item.series_number ?? "0",
+                id: Number(item.id),
+                download: 0,
+              });
+              const freshCmd = link?.js?.cmd;
+              if (freshCmd && typeof freshCmd === "string") {
+                item.cmd = freshCmd.startsWith("ffrt ") ? freshCmd.slice(5) : freshCmd;
+              }
+            } catch (err) {
+              logger.error(`[episode link] failed for id=${item.id}: ${err}`);
+            }
+          }
+        }
+
+        const actualTotalItems = (res?.js && Number(res.js.total_items)) ?? 0;
 
         const responsePayload = {
           success: true,
@@ -377,13 +473,14 @@ export const stalkerV2: ServerRoute[] = [
           total_items: actualTotalItems,
           actual_length: itemsPerApiPage,
           total_loaded: firstPageData.length,
-          data: firstPageData,
+          data: Number(movieId) === 0
+            ? await applyPortalItemOverrides(firstPageData, "movie", String(category), getVodCache)
+            : firstPageData,
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
 
-        // Write payload to DB Cache table if not a volatile search operation
-        if (!search && res && res.js) {
+        if (!search && res?.js) {
           await ContentCache.upsert({
             profileId,
             cacheKey,
@@ -394,7 +491,7 @@ export const stalkerV2: ServerRoute[] = [
 
         return responsePayload;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve movies." })
           .code(500);
@@ -424,47 +521,95 @@ export const stalkerV2: ServerRoute[] = [
         }
 
         const cacheKey = generateCacheKey("series", query);
+        const itemsPerApiPage = 14;
+        const startApiPage = Number(page);
+        const getSeriesCache = (catId: string) =>
+          xtreamCache.get<any[]>(`series_list_${catId}`).then((v) => v ?? []);
 
-        if (!search) {
-          const cachedRecord = await ContentCache.findOne({
-            where: { profileId, cacheKey },
-          });
-
+        // ContentCache check — skip if searching or drilling into a specific item
+        if (!search && Number(movieId) === 0) {
+          const cachedRecord = await ContentCache.findOne({ where: { profileId, cacheKey } });
           if (cachedRecord && new Date() < cachedRecord.expiresAt) {
             return cachedRecord.response;
           }
         }
 
-        const itemsPerApiPage = 14;
-        let sortParam = sort === "alphabetic" ? "name" : "added";
-
-        const res = await serverManager.getProvider().getSeries({
-          category,
-          page: Number(page),
-          movieId,
-          seasonId,
-          episodeId,
-          search,
-          token: query.token,
-          sort: sortParam,
-          ...others,
-        });
-
-        if (res && res.js && Array.isArray(res.js.data)) {
-          res.js.data = res.js.data.map((item: any) => {
-            const isEpisode =
-              !!seasonId || !!item.series_number || item.is_episode;
-            return {
-              ...item,
-              is_episode: isEpisode ? 1 : item.is_episode,
-            };
+        // Virtual categories — serve from xtreamCache overrides
+        if (String(category).startsWith("vcat_") && Number(movieId) === 0) {
+          const movedIn = await ContentOverride.findAll({
+            where: { item_type: "series", target_category_id: String(category) },
+            raw: true,
+          });
+          const allItems: any[] = [];
+          for (const ov of movedIn) {
+            if (ov.hidden || !ov.original_category_id) continue;
+            const itemId = ov.item_key.replace("series_", "");
+            const srcItems = (await xtreamCache.get<any[]>(`series_list_${ov.original_category_id}`)) ?? [];
+            const srcItem = srcItems.find((i: any) => String(i.series_id) === itemId);
+            if (!srcItem) continue;
+            allItems.push({ ...srcItem, id: itemId, name: ov.display_name ?? srcItem.name, [seriesFlag]: 1 });
+          }
+          const offset = (startApiPage - 1) * itemsPerApiPage;
+          const pageData = allItems.slice(offset, offset + itemsPerApiPage);
+          return h.response({
+            success: true,
+            page: Number(page),
+            pageAtaTime: 1,
+            total_items: allItems.length,
+            actual_length: itemsPerApiPage,
+            total_loaded: pageData.length,
+            data: pageData,
+            errors: false,
+            isPortal: initialConfig.providerType === "stalker",
           });
         }
 
-        let firstPageData =
-          res && res.js && Array.isArray(res.js.data) ? res.js.data : [];
-        const actualTotalItems =
-          (res && res.js && Number(res.js.total_items)) ?? 0;
+        const sourceRow = await XtreamCache.findOne({ where: { key: "portal_series_source" } });
+        const isNativeSeries = sourceRow ? JSON.parse(sourceRow.value) === "native" : false;
+
+        const sortParam = sort === "alphabetic" ? "name" : "added";
+        const portalCategory = String(category).startsWith("vcat_") ? "*" : category;
+        const res = isNativeSeries
+          ? await serverManager.getProvider().getSeries({ category: portalCategory, page: Number(page), movieId, seasonId, episodeId, search, token: query.token, sort: sortParam, ...others })
+          : await serverManager.getProvider().getMovies({ category: portalCategory, page: Number(page), movieId, seasonId, episodeId, search, token: query.token, sort: sortParam });
+
+        if (res?.js?.data && Array.isArray(res.js.data)) {
+          res.js.data = res.js.data.map((item: any) => {
+            const isEpisode = !!seasonId || !!item.series_number || item.is_episode;
+            return { ...item, is_episode: isEpisode ? 1 : item.is_episode };
+          });
+        }
+
+        const rawData = res?.js?.data ?? [];
+        let firstPageData = Number(movieId) === 0
+          ? (isNativeSeries ? rawData : rawData.filter((item: any) => item[seriesFlag] == 1))
+          : rawData;
+
+        // VOD-mixed: page 1 may be entirely movies — fall back to warm series cache
+        if (Number(movieId) === 0 && !isNativeSeries && firstPageData.length === 0 && rawData.length > 0) {
+          const cachedSeries = await xtreamCache.get<any[]>(`series_list_${category}`);
+          if (cachedSeries && cachedSeries.length > 0) {
+            const allNormalized = cachedSeries.map((s: any) => ({ ...s, id: String(s.series_id), [seriesFlag]: 1 }));
+            const allOverridden = await applyPortalItemOverrides(allNormalized, "series", String(category), getSeriesCache);
+            const offset = (startApiPage - 1) * itemsPerApiPage;
+            const pageData = allOverridden.slice(offset, offset + itemsPerApiPage);
+            return {
+              success: true,
+              page: Number(page),
+              pageAtaTime: 1,
+              total_items: allOverridden.length,
+              actual_length: itemsPerApiPage,
+              total_loaded: pageData.length,
+              data: pageData,
+              errors: false,
+              isPortal: initialConfig.providerType === "stalker",
+            };
+          }
+        }
+
+        const portalTotal = res?.js?.total_items ?? 0;
+        const ratio = isNativeSeries ? 1 : (rawData.length > 0 ? firstPageData.length / rawData.length : 1);
+        const actualTotalItems = Number(movieId) === 0 ? Math.ceil(portalTotal * ratio) : portalTotal;
 
         const responsePayload = {
           success: true,
@@ -473,12 +618,14 @@ export const stalkerV2: ServerRoute[] = [
           total_items: actualTotalItems,
           actual_length: itemsPerApiPage,
           total_loaded: firstPageData.length,
-          data: firstPageData,
+          data: Number(movieId) === 0
+            ? await applyPortalItemOverrides(firstPageData, "series", String(category), getSeriesCache)
+            : firstPageData,
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
 
-        if (!search && res && res.js) {
+        if (!search && res?.js) {
           await ContentCache.upsert({
             profileId,
             cacheKey,
@@ -489,7 +636,7 @@ export const stalkerV2: ServerRoute[] = [
 
         return responsePayload;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve series." })
           .code(500);
@@ -544,11 +691,134 @@ export const stalkerV2: ServerRoute[] = [
 
         return movieLink;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve movie link." })
           .code(500);
       }
+    },
+  },
+  {
+    // Rewrites legacy portal-prefixed stream_icon values stored in the
+    // live_streams_* XtreamCache entries to the proxied /api/images format.
+    // One-shot in-place migration — nothing is deleted.
+    method: "POST",
+    path: "/api/v2/debug/fix-live-icons",
+    handler: async (_request, h) => {
+      try {
+        const { Op } = await import("sequelize");
+        const rows = await XtreamCache.findAll({
+          where: { key: { [Op.like]: "live_streams_%" } },
+        });
+        const portalPrefix = `${initialConfig.https ? "https" : "http"}://${initialConfig.hostname}:${initialConfig.port}`;
+        let entriesUpdated = 0;
+        let iconsRewritten = 0;
+
+        for (const row of rows) {
+          let list: any;
+          try { list = JSON.parse(row.value); } catch { continue; }
+          if (!Array.isArray(list)) continue;
+
+          let changed = false;
+          const fixed = list.map((c: any) => {
+            const icon = c?.stream_icon;
+            if (typeof icon === "string" && icon.startsWith(portalPrefix)) {
+              const rawLogo = icon.slice(portalPrefix.length).replace(/^\//, "");
+              changed = true;
+              iconsRewritten++;
+              return { ...c, stream_icon: proxiedLogoPath(rawLogo) };
+            }
+            return c;
+          });
+
+          if (changed) {
+            row.value = JSON.stringify(fixed);
+            await row.save();
+            entriesUpdated++;
+          }
+        }
+
+        return h.response({
+          success: true,
+          cacheEntriesScanned: rows.length,
+          cacheEntriesUpdated: entriesUpdated,
+          iconsRewritten,
+        });
+      } catch (err: any) {
+        return h.response({ success: false, error: err.message }).code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v2/debug/epg",
+    handler: async (request, h) => {
+      const { id } = request.query as { id?: string };
+      if (!id) return h.response({ error: "id required" }).code(400);
+      try {
+        const epg = await serverManager.getProvider().getEPG(id);
+        return h.response({ channelId: id, count: epg?.js?.length ?? 0, programs: epg?.js?.slice(0, 3) });
+      } catch (err: any) {
+        return h.response({ error: err.message }).code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v2/debug/vod-item",
+    handler: async (request, h) => {
+      try {
+        const { id } = request.query as { id?: string };
+        if (!id) return h.response({ error: "id required" }).code(400);
+        const data = await serverManager.getProvider().getMovies({ category: "*", page: 1, movieId: parseInt(id) });
+        return h.response({ raw: data?.js?.data || [] });
+      } catch (err: any) {
+        return h.response({ error: err.message }).code(500);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v2/debug/episode-fetch",
+    handler: async (request, h) => {
+      const { seriesId, seasonId, category = "*" } = request.query as { seriesId?: string; seasonId?: string; category?: string };
+      if (!seriesId || !seasonId) return h.response({ error: "seriesId and seasonId required" }).code(400);
+      const provider = serverManager.getProvider();
+      const results: any = {};
+
+      const summarise = (r: any) => ({
+        jsKeys: Object.keys(r?.js || {}),
+        total_items: r?.js?.total_items,
+        data_length: r?.js?.data?.length ?? 0,
+        first_item: r?.js?.data?.[0] ?? null,
+        raw_js: r?.js,
+      });
+
+      try {
+        results.A_vod_movie_series_season = summarise(
+          await provider.getMovies({ category, page: 1, movieId: parseInt(seriesId), seasonId: parseInt(seasonId) })
+        );
+      } catch (e: any) { results.A_vod_movie_series_season = { error: e.message }; }
+
+      try {
+        results.B_vod_movie_season_only = summarise(
+          await provider.getMovies({ category, page: 1, movieId: parseInt(seasonId) })
+        );
+      } catch (e: any) { results.B_vod_movie_season_only = { error: e.message }; }
+
+      try {
+        results.C_series_movie_series_season = summarise(
+          await provider.getSeries({ category, page: 1, movieId: parseInt(seriesId), seasonId: parseInt(seasonId) })
+        );
+      } catch (e: any) { results.C_series_movie_series_season = { error: e.message }; }
+
+      try {
+        results.D_series_movie_season_only = summarise(
+          await provider.getSeries({ category, page: 1, movieId: parseInt(seasonId) })
+        );
+      } catch (e: any) { results.D_series_movie_season_only = { error: e.message }; }
+
+      return h.response(results);
     },
   },
   {
@@ -557,14 +827,30 @@ export const stalkerV2: ServerRoute[] = [
     handler: async (request, h) => {
       try {
         const profileId = await getActiveProfileId();
-        const groups = await serverManager.getProvider().getSeriesGroups();
-        const filteredChannels = groups.js.filter(
-          (channel) => initialConfig.playCensored || channel.censored != 1,
+
+        // Try native series API first (Type 2 portal)
+        const nativeGroups = await serverManager.getProvider().getSeriesGroups();
+        const nativeCats = (Array.isArray(nativeGroups?.js) ? nativeGroups.js : []).filter(
+          (ch: any) => initialConfig.playCensored || ch.censored != 1,
         );
-        await writeGenres(filteredChannels, "series", profileId);
-        return filteredChannels;
+
+        if (nativeCats.length > 0) {
+          await upsertGenres(nativeCats, "series", profileId);
+          await XtreamCache.upsert({ key: "portal_series_source", value: JSON.stringify("native"), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
+          await xtreamCache.delete("series_cats");
+          warmSeriesCache().catch((e) => logger.error({ err: e }, "[warm-xtream-series]"));
+          return nativeCats;
+        }
+
+        // Portal A — series are mixed into VOD with is_series flag.
+        // Don't pre-populate series genres here; warmVodCache will scan each
+        // VOD category and call upsertGenre("series") for any that contain series.
+        await XtreamCache.upsert({ key: "portal_series_source", value: JSON.stringify("vod"), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
+        await xtreamCache.delete("series_cats");
+        warmVodCache().catch((e) => logger.error({ err: e }, "[warm-xtream-vod]"));
+        return await readGenres("series", profileId);
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -574,6 +860,15 @@ export const stalkerV2: ServerRoute[] = [
       }
     },
   },
+  {
+    method: "POST",
+    path: "/api/v2/catchup-scan",
+    handler: async (_request, h) => {
+      catchupScan().catch((e) => logger.error(`[catchup-scan] ${e}`));
+      return h.response({ success: true, message: "Catch-up scan started in background." });
+    },
+  },
+
   {
     method: "GET",
     path: "/api/v2/series-groups",
@@ -591,12 +886,12 @@ export const stalkerV2: ServerRoute[] = [
           total_items: channels.length,
           actual_length: channels.length,
           total_loaded: channels.length,
-          data: channels.sort((a, b) => (a.number || 0) - (b.number || 0)),
+          data: await applyGenreOverrides(channels, "series"),
           errors: false,
           isPortal: initialConfig.providerType === "stalker",
         };
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -616,7 +911,7 @@ export const stalkerV2: ServerRoute[] = [
           .getChannelLink(request.query.cmd as any);
         return channelLink;
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -635,11 +930,19 @@ export const stalkerV2: ServerRoute[] = [
         if (cache) return cache;
         return [];
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({ success: false, error: "Failed to retrieve EPG." })
           .code(500);
       }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v2/refresh-epg",
+    handler: async (_request, h) => {
+      fetchAndCacheEpg().catch((e) => logger.error(`[refresh-epg] ${e}`));
+      return h.response({ success: true, message: "EPG refresh started in background." });
     },
   },
   {
@@ -650,7 +953,7 @@ export const stalkerV2: ServerRoute[] = [
         const expiry = await serverManager.getProvider().getExpiry();
         return { success: true, expiry };
       } catch (err) {
-        console.error(err);
+        logger.error({ err }, "error");
         return h
           .response({
             success: false,
@@ -682,7 +985,7 @@ export const stalkerV2: ServerRoute[] = [
           .response({ success: false, error: "Failed to fetch token" })
           .code(500);
       } catch (err) {
-        console.error("Error fetching new token:", err);
+        logger.error({ err }, "Error fetching new token");
         return h
           .response({ success: false, error: "Failed to fetch new token." })
           .code(500);
@@ -705,13 +1008,57 @@ export const stalkerV2: ServerRoute[] = [
         }
         return { success: true, message: "All tokens cleared." };
       } catch (err) {
-        console.error("Error clearing tokens:", err);
+        logger.error({ err }, "Error clearing tokens");
         return h
           .response({ success: false, error: "Failed to clear tokens." })
           .code(500);
       }
     },
   },
+  {
+    method: "POST",
+    path: "/api/v2/warm-xtream-vod",
+    handler: async (_request, h) => {
+      warmVodCache().catch((e) => logger.error({ err: e }, "[warm-xtream-vod]"));
+      return { success: true, message: "VOD cache warming started in background." };
+    },
+  },
+
+  {
+    method: "POST",
+    path: "/api/v2/warm-xtream-series",
+    handler: async (_request, h) => {
+      warmSeriesCache().catch((e) => logger.error({ err: e }, "[warm-xtream-series]"));
+      warmSeriesInfoCache().catch((e) => logger.error({ err: e }, "[warm-xtream-series-info]"));
+      return { success: true, message: "Series cache warming started in background." };
+    },
+  },
+
+  {
+    method: "POST",
+    path: "/api/v2/cleanup-genres",
+    handler: async (_request, h) => {
+      await cleanupGenres();
+      return { success: true, message: "Genre cleanup complete." };
+    },
+  },
+
+  {
+    method: "DELETE",
+    path: "/api/v2/clear-xtream-cache",
+    handler: async (_request, h) => {
+      try {
+        const count = await XtreamCache.destroy({ where: {} });
+        return { success: true, message: `Cleared ${count} xtream cache entries.` };
+      } catch (err) {
+        logger.error({ err }, "Error clearing xtream cache");
+        return h
+          .response({ success: false, error: "Failed to clear xtream cache." })
+          .code(500);
+      }
+    },
+  },
+
   {
     method: "GET",
     path: "/api/v2/download",
@@ -922,6 +1269,13 @@ export const stalkerV2: ServerRoute[] = [
         } else {
           if (path.startsWith("/")) {
             targetUrl = `http://${initialConfig.hostname}:${initialConfig.port}${path}`;
+          } else {
+            // Reject arbitrary external URLs to prevent SSRF
+            const parsed = new URL(path);
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+              return h.response({ error: "Invalid URL" }).code(400);
+            }
+            targetUrl = path;
           }
           headers = {
             "User-Agent": "VLC/3.0.16 LibVLC/3.0.16",
@@ -955,8 +1309,29 @@ export const stalkerV2: ServerRoute[] = [
         proxyResponse.code(response.status);
         return proxyResponse;
       } catch (error: any) {
-        console.error("Download proxy error:", error.message);
+        logger.error("Download proxy error: " + (error?.message ?? error));
         return h.response({ error: "Failed to proxy download" }).code(500);
+      }
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/api/v2/playlist-download",
+    handler: async (request, h) => {
+      const { type } = request.query as { type?: string };
+      const origin = getPublicOrigin(request);
+
+      if (type === "vod") {
+        const m3u = await getVodM3uV2(origin);
+        return h.response(m3u)
+          .type("application/vnd.apple.mpegurl")
+          .header("Content-Disposition", 'attachment; filename="vod.m3u"');
+      } else {
+        const m3u = await getM3uV2(origin);
+        return h.response(m3u)
+          .type("application/vnd.apple.mpegurl")
+          .header("Content-Disposition", 'attachment; filename="iptv.m3u"');
       }
     },
   },

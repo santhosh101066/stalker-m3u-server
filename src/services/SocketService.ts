@@ -17,7 +17,7 @@ class SocketService {
   public init(httpServer: Server) {
     this.io = new SocketIOServer(httpServer, {
       cors: {
-        origin: "*",
+        origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : false,
         methods: ["GET", "POST"],
       },
     });

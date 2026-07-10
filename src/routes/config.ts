@@ -1,6 +1,7 @@
 import { ServerRoute } from "@hapi/hapi";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { logger } from "@/utils/logger";
 import { serverManager } from "../serverManager";
 import { initialConfig } from "@/config/server";
 import { stalkerApi } from "@/utils/stalker";
@@ -52,7 +53,7 @@ export const configRoutes: ServerRoute[] = [
           await Genre.destroy({ where: { profileId } });
           await EpgCache.destroy({ where: { profileId } });
           await ContentCache.destroy({ where: { profileId } }); // Flush ContentCache as configuration profile changes
-          console.log(`Cleared cached database and content records for profile: ${activeProfile.name}`);
+          logger.info(`Cleared cached database and content records for profile: ${activeProfile.name}`);
         } else {
           return h.response({ error: "No active profile found to update." }).code(404);
         }
@@ -65,11 +66,11 @@ export const configRoutes: ServerRoute[] = [
 
           return { message: "Configuration updated and reloaded successfully.", hash };
         } catch (error) {
-          console.error("Error reloading server config:", error);
+          logger.error({ err: error }, "Error reloading server config");
           return h.response({ error: "Configuration updated but server reload failed", details: error }).code(500);
         }
       } catch (error) {
-        console.error("Error updating config:", error);
+        logger.error({ err: error }, "Error updating config");
         return h.response({ error: "Failed to update configuration" }).code(500);
       }
     },
@@ -81,7 +82,10 @@ export const configRoutes: ServerRoute[] = [
       try {
         const payload = request.payload as any;
         const providedPassword = payload?.password;
-        const expectedPassword = process.env.ADMIN_PASSWORD || "admin";
+        const expectedPassword = process.env.ADMIN_PASSWORD;
+          if (!expectedPassword) {
+            return h.response({ error: "Server misconfiguration: ADMIN_PASSWORD not set" }).code(503);
+          }
 
         if (providedPassword === expectedPassword) {
           const token = createJWT({ role: "admin" });
@@ -90,7 +94,7 @@ export const configRoutes: ServerRoute[] = [
           return h.response({ error: "Invalid password" }).code(401);
         }
       } catch (error) {
-        console.error("Error during admin authentication:", error);
+        logger.error({ err: error }, "Error during admin authentication");
         return h.response({ error: "Authentication failed" }).code(500);
       }
     },
@@ -109,11 +113,11 @@ export const configRoutes: ServerRoute[] = [
           await Genre.destroy({ where: { profileId } });
           await EpgCache.destroy({ where: { profileId } });
           await ContentCache.destroy({ where: { profileId } }); // Manual purge removes persistent entries instantly!
-          console.log(`Cleared cached database and video content records for profile: ${activeProfile.name}`);
+          logger.info(`Cleared cached database and video content records for profile: ${activeProfile.name}`);
         }
         return { success: true, message: "Cache cleared successfully." };
       } catch (error: any) {
-        console.error("Error clearing cache:", error);
+        logger.error({ err: error }, "Error clearing cache");
         return h.response({ success: false, error: error.message }).code(500);
       }
     },
@@ -126,7 +130,7 @@ export const configRoutes: ServerRoute[] = [
         const record = await SystemConfig.findOne({ where: { key: "carousel_slides" } });
         return record ? record.value : [];
       } catch (error) {
-        console.error("Error fetching carousel config:", error);
+        logger.error({ err: error }, "Error fetching carousel config");
         return h.response({ error: "Failed to fetch carousel configuration" }).code(500);
       }
     },
@@ -141,7 +145,7 @@ export const configRoutes: ServerRoute[] = [
         await SystemConfig.upsert({ key: "carousel_slides", value: payload });
         return { success: true, message: "Carousel configuration updated successfully." };
       } catch (error) {
-        console.error("Error updating carousel config:", error);
+        logger.error({ err: error }, "Error updating carousel config");
         return h.response({ error: "Failed to update carousel configuration" }).code(500);
       }
     },
@@ -174,7 +178,7 @@ export const configRoutes: ServerRoute[] = [
 
         return { success: true, url: `/uploads/${uniqueFilename}` };
       } catch (error) {
-        console.error("Error during file upload:", error);
+        logger.error({ err: error }, "Error during file upload");
         return h.response({ error: "Failed to upload file" }).code(500);
       }
     },

@@ -1,11 +1,13 @@
 import { ServerRoute } from "@hapi/hapi";
+import { logger } from "@/utils/logger";
 import { OAuth2Client } from "google-auth-library";
 import { User } from "../models/User";
 import { DeviceCode } from "../models/DeviceCode";
 import { createJWT, verifyJWT, authCheck } from "../utils/jwt";
 import { v4 as uuidv4 } from "uuid";
 import { verifyPassword, hashPassword } from "../utils/password";
-import { sendAdminApprovalRequest, sendPasswordResetEmail } from "../utils/email";
+import { sendAdminApprovalRequest } from "../utils/email";
+import { getPublicOrigin } from "../utils/publicUrl";
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -47,7 +49,7 @@ export const authRoutes: ServerRoute[] = [
           });
           googlePayload = ticket.getPayload();
         } catch (err: any) {
-          console.error("Google token verification failed:", err);
+          logger.error({ err }, "Google token verification failed");
           return h.response({ error: "Invalid Google ID Token" }).code(401);
         }
 
@@ -113,7 +115,7 @@ export const authRoutes: ServerRoute[] = [
             });
             // Send SMTP approval email to admin
             sendAdminApprovalRequest(name, email).catch(err => {
-              console.error("Failed to send admin approval email:", err);
+              logger.error({ err }, "Failed to send admin approval email");
             });
             return h.response({ error: "Access Denied. Your request for access has been submitted. Please wait for administrator approval." }).code(403);
           }
@@ -154,7 +156,7 @@ export const authRoutes: ServerRoute[] = [
           }
         };
       } catch (error) {
-        console.error("Error during Google auth:", error);
+        logger.error({ err: error }, "Error during Google auth");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -174,8 +176,11 @@ export const authRoutes: ServerRoute[] = [
 
         // Check for Admin credentials configured in .env
         const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
-        const adminEmailsList = (process.env.ADMIN_EMAILS || "").split(",").map(e => e.trim().toLowerCase());
-        const isAdminEmail = email === adminEmail || adminEmailsList.includes(email);
+        const adminEmailsList = (process.env.ADMIN_EMAILS || "").split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+        // If no admin email is configured at all, the admin password alone
+        // grants admin access (bootstrap mode for fresh deployments).
+        const noAdminEmailConfigured = !adminEmail && adminEmailsList.length === 0;
+        const isAdminEmail = email === adminEmail || adminEmailsList.includes(email) || noAdminEmailConfigured;
         const envAdminPassword = process.env.ADMIN_PASSWORD;
 
         if (isAdminEmail && envAdminPassword && password === envAdminPassword) {
@@ -269,7 +274,7 @@ export const authRoutes: ServerRoute[] = [
           }
         };
       } catch (error) {
-        console.error("Error during credentials login:", error);
+        logger.error({ err: error }, "Error during credentials login");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -316,7 +321,7 @@ export const authRoutes: ServerRoute[] = [
 
         // Trigger SMTP approval email to admin in background
         sendAdminApprovalRequest(name, email).catch(err => {
-          console.error("Failed to send admin approval email:", err);
+          logger.error({ err }, "Failed to send admin approval email");
         });
 
         return {
@@ -324,7 +329,7 @@ export const authRoutes: ServerRoute[] = [
           message: "Signup successful. Your request for access has been submitted. Please wait for administrator approval."
         };
       } catch (error) {
-        console.error("Error during credentials signup:", error);
+        logger.error({ err: error }, "Error during credentials signup");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -364,7 +369,7 @@ export const authRoutes: ServerRoute[] = [
           refreshToken
         };
       } catch (error) {
-        console.error("Error during token refresh:", error);
+        logger.error({ err: error }, "Error during token refresh");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -385,12 +390,8 @@ export const authRoutes: ServerRoute[] = [
           expiresAt
         });
 
-        // Resolve absolute URL dynamically based on host
-        console.log(request);
-        
-        const host = request.info.host || "localhost:3000";
-        const proto = request.headers["x-forwarded-proto"] || "http";
-        const verificationUrl = `${proto}://${host}/#/verify?code=${userCode}`;
+        // Resolve absolute URL dynamically based on host (reverse-proxy aware)
+        const verificationUrl = `${getPublicOrigin(request)}/#/verify?code=${userCode}`;
 
         return {
           deviceCode,
@@ -399,7 +400,7 @@ export const authRoutes: ServerRoute[] = [
           expiresIn: 300 // 5 minutes in seconds
         };
       } catch (error) {
-        console.error("Error generating device code:", error);
+        logger.error({ err: error }, "Error generating device code");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -470,7 +471,7 @@ export const authRoutes: ServerRoute[] = [
 
         return { status: record.status };
       } catch (error) {
-        console.error("Error polling device code:", error);
+        logger.error({ err: error }, "Error polling device code");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -512,82 +513,7 @@ export const authRoutes: ServerRoute[] = [
 
         return { success: true, message: "Device successfully authorized!" };
       } catch (error) {
-        console.error("Error authorizing device code:", error);
-        return h.response({ error: "Internal Server Error" }).code(500);
-      }
-    },
-  },
-  {
-    method: "POST",
-    path: "/api/auth/forgot-password",
-    handler: async (request, h) => {
-      try {
-        const payload = request.payload as any;
-        const email = payload?.email?.toLowerCase().trim();
-
-        if (!email) {
-          return h.response({ error: "Missing email address" }).code(400);
-        }
-
-        const user = await User.findOne({ where: { email } });
-        if (!user) {
-          // Return generic success to avoid email enumeration security vulnerability
-          return { success: true, message: "If an account exists with this email, a reset link has been sent." };
-        }
-
-        const token = uuidv4();
-        user.resetToken = token;
-        user.resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-        await user.save();
-
-        const referer = request.headers.referer || `http://localhost:5173/`;
-        const baseUrl = referer.split("#")[0];
-        const resetLink = `${baseUrl}#/reset-password?token=${token}`;
-
-        await sendPasswordResetEmail(user.name, user.email, resetLink);
-
-        return { success: true, message: "If an account exists with this email, a reset link has been sent." };
-      } catch (error) {
-        console.error("Error in forgot-password:", error);
-        return h.response({ error: "Internal Server Error" }).code(500);
-      }
-    },
-  },
-  {
-    method: "POST",
-    path: "/api/auth/reset-password",
-    handler: async (request, h) => {
-      try {
-        const payload = request.payload as any;
-        const { token, password } = payload;
-
-        if (!token || !password) {
-          return h.response({ error: "Missing token or password" }).code(400);
-        }
-
-        const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).{8,}$/;
-        if (!passwordRegex.test(password)) {
-          return h.response({ error: "Password is not matching its criteria" }).code(400);
-        }
-
-        const user = await User.findOne({
-          where: { resetToken: token }
-        });
-
-        if (!user || !user.resetTokenExpires || new Date() > user.resetTokenExpires) {
-          return h.response({ error: "Invalid or expired reset token." }).code(400);
-        }
-
-        const { hash, salt } = hashPassword(password);
-        user.passwordHash = hash;
-        user.salt = salt;
-        user.resetToken = undefined;
-        user.resetTokenExpires = undefined;
-        await user.save();
-
-        return { success: true, message: "Password reset successfully. You can now log in." };
-      } catch (error) {
-        console.error("Error in reset-password:", error);
+        logger.error({ err: error }, "Error authorizing device code");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },

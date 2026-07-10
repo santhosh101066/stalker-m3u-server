@@ -8,7 +8,7 @@
     },
     "outDir": "dist", 
     "module": "commonjs",
-    "target": "ES2021",
+    "target": "ES2022",
     "moduleResolution": "node",
     "esModuleInterop": true,
     "resolveJsonModule": true,
@@ -18,9 +18,10 @@
     "strict": true,
     "sourceMap": true,
     "rootDir": "src",
+    "types": ["node"],
     "lib": [
-      "ES2021"
-    ] 
+      "ES2022"
+    ]
   },
   "include": [
     "src"

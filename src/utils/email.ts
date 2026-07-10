@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { logger } from "@/utils/logger";
 
 /**
  * Sends an email notification to the ADMIN_EMAIL when a new user registers and is pending approval.
@@ -6,7 +7,7 @@ import nodemailer from "nodemailer";
 export async function sendAdminApprovalRequest(name: string, email: string): Promise<void> {
   const adminEmail = process.env.ADMIN_EMAIL;
   if (!adminEmail) {
-    console.warn("SMTP Warning: ADMIN_EMAIL is not configured. Approval email skipped.");
+    logger.warn("SMTP Warning: ADMIN_EMAIL is not configured. Approval email skipped.");
     return;
   }
 
@@ -17,7 +18,7 @@ export async function sendAdminApprovalRequest(name: string, email: string): Pro
   const from = process.env.SMTP_FROM || `"Stalker Portal" <${user}>`;
 
   if (!host || !user || !pass) {
-    console.warn("SMTP Warning: Mail server host/user/pass is not configured. Approval email skipped.");
+    logger.warn("SMTP Warning: Mail server host/user/pass is not configured. Approval email skipped.");
     return;
   }
 
@@ -51,9 +52,9 @@ export async function sendAdminApprovalRequest(name: string, email: string): Pro
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log(`Approval request email sent to admin: ${adminEmail}`);
+    logger.info(`Approval request email sent to admin: ${adminEmail}`);
   } catch (error) {
-    console.error("Failed to send SMTP approval notification:", error);
+    logger.error({ err: error }, "Failed to send SMTP approval notification");
   }
 }
 
@@ -65,7 +66,7 @@ export async function sendUserApprovedEmail(name: string, email: string): Promis
   const from = process.env.SMTP_FROM || `"Stalker Portal" <${user}>`;
 
   if (!host || !user || !pass) {
-    console.warn("SMTP Warning: Mail server host/user/pass is not configured. User approval email skipped.");
+    logger.warn("SMTP Warning: Mail server host/user/pass is not configured. User approval email skipped.");
     return;
   }
 
@@ -106,9 +107,9 @@ export async function sendUserApprovedEmail(name: string, email: string): Promis
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log(`Approval email successfully sent to user: ${email}`);
+    logger.info(`Approval email successfully sent to user: ${email}`);
   } catch (error) {
-    console.error("Failed to send SMTP user approval email:", error);
+    logger.error({ err: error }, "Failed to send SMTP user approval email");
   }
 }
 

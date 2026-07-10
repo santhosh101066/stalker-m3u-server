@@ -8,6 +8,138 @@ import { appConfig, initialConfig } from "@/config/server";
 import { ReqRefDefaults, ResponseToolkit } from "@hapi/hapi/lib/types";
 import { stalkerApi } from "@/utils/stalker";
 import { logger } from "@/utils/logger";
+import { spawn, ChildProcess, execFile } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+
+const execFileAsync = promisify(execFile);
+
+// ─── HEVC codec detection (cached per cmd for 1 hour) ─────────────────────────
+
+// Server-side HEVC→H.264 transcoding is opt-in (LIVE_TRANSCODE=true). By default
+// streams are proxied untouched and the client's hardware decoder handles HEVC.
+const LIVE_TRANSCODE_ENABLED = process.env.LIVE_TRANSCODE === "true";
+
+const codecCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+
+async function detectCodec(cmd: string): Promise<string> {
+  const cached = codecCache.get<string>(cmd);
+  if (cached !== undefined) return cached;
+  try {
+    const streamUrl = await cmdPlayerV2(cmd);
+    if (!streamUrl) return "";
+    logger.info(`[LiveTranscode] Probing codec: ${streamUrl}`);
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-user_agent", "VLC/3.0.16 LibVLC/3.0.16",
+      "-v", "quiet",
+      "-print_format", "json",
+      "-show_streams",
+      "-select_streams", "v:0",
+      "-probesize", "2000000",
+      "-analyzeduration", "1000000",
+      streamUrl,
+    ], { timeout: 12_000 });
+    const data = JSON.parse(stdout);
+    const codec: string = data.streams?.[0]?.codec_name || "";
+    codecCache.set(cmd, codec);
+    logger.info(`[LiveTranscode] Detected codec=${codec} for cmd=${cmd}`);
+    return codec;
+  } catch (e: any) {
+    logger.warn(`[LiveTranscode] Probe failed: ${e.message}`);
+    codecCache.set(cmd, "");
+    return "";
+  }
+}
+
+// ─── Live transcode sessions ──────────────────────────────────────────────────
+
+interface TranscodeSession {
+  process: ChildProcess | null;
+  lastAccess: number;
+  ready: boolean;
+}
+
+const transcodeSessions = new Map<string, TranscodeSession>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of transcodeSessions.entries()) {
+    if (now - session.lastAccess > 60_000) {
+      logger.info(`[LiveTranscode] Cleaning up idle session ${id}`);
+      if (session.process && !session.process.killed) session.process.kill("SIGKILL");
+      const dir = path.join(process.cwd(), "temp", "live-transcode", id);
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      transcodeSessions.delete(id);
+    }
+  }
+}, 15_000);
+
+async function ensureTranscodeSession(cmd: string): Promise<string | null> {
+  const sessionId = crypto.createHash("sha256").update(cmd).digest("hex").slice(0, 16);
+  const sessionDir = path.join(process.cwd(), "temp", "live-transcode", sessionId);
+  const playlistPath = path.join(sessionDir, "playlist.m3u8");
+
+  let session = transcodeSessions.get(sessionId);
+  const dead = !session?.process || session.process.killed ||
+    session.process.exitCode !== null || session.process.signalCode !== null;
+
+  if (!session || dead) {
+    const streamUrl = await cmdPlayerV2(cmd);
+    if (!streamUrl) return null;
+
+    if (session?.process && !session.process.killed) session.process.kill("SIGKILL");
+    fs.mkdirSync(sessionDir, { recursive: true });
+    try {
+      for (const f of fs.readdirSync(sessionDir)) {
+        fs.unlinkSync(path.join(sessionDir, f));
+      }
+    } catch {}
+
+    const proc = spawn("ffmpeg", [
+      "-user_agent", "VLC/3.0.16 LibVLC/3.0.16",
+      "-reconnect", "1",
+      "-reconnect_on_network_error", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+      "-i", streamUrl,
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-tune", "zerolatency",
+      "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+      "-f", "hls",
+      "-hls_time", "4",
+      "-hls_flags", "delete_segments+omit_endlist",
+      "-hls_list_size", "6",
+      "-hls_segment_filename", path.join(sessionDir, "%d.ts"),
+      playlistPath,
+    ]);
+
+    proc.stderr.on("data", (d: Buffer) => {
+      const line = d.toString().trim();
+      if (line.includes("error") || line.includes("Error"))
+        logger.error(`[LiveTranscode:${sessionId}] ${line}`);
+    });
+    proc.on("close", (code) => logger.info(`[LiveTranscode:${sessionId}] FFmpeg exited code=${code}`));
+    proc.on("error", (e) => logger.error(`[LiveTranscode:${sessionId}] Spawn error: ${e.message}`));
+
+    session = { process: proc, lastAccess: Date.now(), ready: false };
+    transcodeSessions.set(sessionId, session);
+
+    let waited = 0;
+    while (!fs.existsSync(playlistPath) && waited < 15_000) {
+      await new Promise(r => setTimeout(r, 300));
+      waited += 300;
+    }
+    session.ready = fs.existsSync(playlistPath);
+    logger.info(`[LiveTranscode:${sessionId}] ready=${session.ready} after ${waited}ms`);
+  } else {
+    session.lastAccess = Date.now();
+  }
+
+  return session.ready ? sessionId : null;
+}
 
 const SECRET_KEY = appConfig.proxy.secretKey;
 const sequenceRegex = /#EXT-X-MEDIA-SEQUENCE:(\d+)/;
@@ -35,9 +167,34 @@ interface CacheRecord {
   baseUrl: string;
   segments: Map<number, string>;
   subpath?: string;
+  masterUrl?: string;
 }
 
 const cache = new NodeCache({ stdTTL: 30, checkperiod: 10 });
+
+// ── Segment read-ahead ────────────────────────────────────────────────────────
+// When a segment is served, the next one is prefetched in the background so the
+// browser's next request is answered from memory instead of paying the full
+// portal round-trip — the main cause of stutter through the proxy.
+const segmentPrefetch = new NodeCache({ stdTTL: 30, checkperiod: 10, useClones: false });
+
+type PrefetchedSegment = { data: Buffer; contentType: string } | undefined;
+
+function prefetchNextSegment(cmd: string, nextSeq: number, record: CacheRecord): void {
+  const segPath = record.segments.get(nextSeq);
+  if (!segPath) return;
+  const key = `${cmd}<_>${nextSeq}`;
+  if (segmentPrefetch.has(key)) return;
+  const url = new URL(segPath, record.baseUrl).href;
+  const promise: Promise<PrefetchedSegment> = axios
+    .get<ArrayBuffer>(url, { responseType: "arraybuffer", timeout: 10_000 })
+    .then((res) => ({
+      data: Buffer.from(res.data as any),
+      contentType: String(res.headers["content-type"] || "video/mp2t"),
+    }))
+    .catch(() => undefined);
+  segmentPrefetch.set(key, promise);
+}
 
 const pendingCommands = new Map<string, Promise<void>>();
 
@@ -87,7 +244,7 @@ async function populateCache(cmd: string): Promise<void> {
     logger.info(
       `Successfully cached ${segments.size} segments. Start Seq: ${seqMatch ? seqMatch[1] : 0}`,
     );
-    cache.set(cmd, { baseUrl: finalBaseUrl, segments, subpath } as CacheRecord);
+    cache.set(cmd, { baseUrl: finalBaseUrl, segments, subpath, masterUrl } as CacheRecord);
   };
 
   const promise = initCache().finally(() => {
@@ -98,23 +255,19 @@ async function populateCache(cmd: string): Promise<void> {
   await promise;
 }
 
-async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
-  try {
-    const redirectedUrl = await cmdPlayerV2(cmd);
-    if (redirectedUrl) {
-      return h.redirect(redirectedUrl).code(302);
-    }
-    return h
-      .response({ error: "Unable to fetch stream [Non Proxy]" })
-      .code(400);
-  } catch (err) {
-    logger.error(`Non-proxy error: ${err}`);
-    return h.response({ error: "Stream fetch failed" }).code(500);
-  }
-}
-
 async function handleProxy(cmd: string, play: string | undefined, h: any) {
   try {
+    // Optionally auto-detect HEVC and transcode for clients that can't decode it
+    if (LIVE_TRANSCODE_ENABLED) {
+      const codec = await detectCodec(cmd);
+      if (["hevc", "h265"].includes(codec.toLowerCase())) {
+        const sessionId = await ensureTranscodeSession(cmd);
+        if (!sessionId) return h.response("Transcoder failed to start").code(503);
+        const playlist = `#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=4000000\n/live-hls/${sessionId}/playlist.m3u8`;
+        return h.response(playlist).type("application/vnd.apple.mpegurl");
+      }
+    }
+
     if (!cache.get(cmd)) {
       await populateCache(cmd);
     }
@@ -137,6 +290,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
           );
           if (record) {
             record.baseUrl = newBaseUrl;
+            record.masterUrl = newMasterUrl;
             cache.set(cmd, record as CacheRecord);
           }
           return await axios.get(newMasterUrl, { validateStatus: () => true });
@@ -214,7 +368,9 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         .response(modifiedLines.join("\n"))
         .type("application/vnd.apple.mpegurl");
     } else {
-      const masterUrl = await cmdPlayerV2(cmd);
+      // Reuse the master URL resolved during populateCache — a second
+      // create_link round-trip to the portal doubles startup latency.
+      const masterUrl = record.masterUrl || await cmdPlayerV2(cmd);
       if (!masterUrl)
         return h.response({ error: "Stream Not Found" }).code(404);
       const res = await fetchPlaylist(masterUrl);
@@ -230,7 +386,7 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
         if (line.match(".m3u8")) {
           record.subpath = line;
           cache.set(cmd, record as CacheRecord);
-          return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1`;
+          return `/live.m3u8?cmd=${encodeURIComponent(cmd)}&play=1&proxy=1`;
         }
 
         const resourceId = `${cmd}<_>${currentSeq}`;
@@ -263,7 +419,57 @@ async function handleProxy(cmd: string, play: string | undefined, h: any) {
   }
 }
 
+async function handleNonProxy(cmd: string, h: ResponseToolkit<ReqRefDefaults>) {
+  try {
+    const redirectedUrl = await cmdPlayerV2(cmd);
+    if (redirectedUrl) {
+      return h.redirect(redirectedUrl).code(302);
+    }
+    return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
+  } catch (err) {
+    logger.error(`Non-proxy error: ${err}`);
+    return h.response({ error: "Stream fetch failed" }).code(500);
+  }
+}
+
 export const liveRoutes: ServerRoute[] = [
+  // ── Transcoded live HLS playlist ───────────────────────────────────────────
+  {
+    method: "GET",
+    path: "/live-hls/{sessionId}/playlist.m3u8",
+    handler: (request, h) => {
+      const { sessionId } = request.params as { sessionId: string };
+      const session = transcodeSessions.get(sessionId);
+      if (!session) return h.response("Session not found").code(404);
+      session.lastAccess = Date.now();
+      const playlistPath = path.join(process.cwd(), "temp", "live-transcode", sessionId, "playlist.m3u8");
+      if (!fs.existsSync(playlistPath)) return h.response("Playlist not ready").code(503);
+      // Rewrite bare segment filenames to full server paths
+      let content = fs.readFileSync(playlistPath, "utf-8");
+      content = content.replace(/^(\d+\.ts)$/gm, `/live-hls/${sessionId}/$1`);
+      return h.response(content)
+        .type("application/vnd.apple.mpegurl")
+        .header("Cache-Control", "no-cache")
+        .header("Access-Control-Allow-Origin", "*");
+    },
+  },
+  // ── Transcoded live HLS segments ───────────────────────────────────────────
+  {
+    method: "GET",
+    path: "/live-hls/{sessionId}/{segment}.ts",
+    handler: (request, h) => {
+      const { sessionId, segment } = request.params as { sessionId: string; segment: string };
+      const session = transcodeSessions.get(sessionId);
+      if (!session) return h.response("Session not found").code(404);
+      session.lastAccess = Date.now();
+      const segPath = path.join(process.cwd(), "temp", "live-transcode", sessionId, `${segment}.ts`);
+      if (!fs.existsSync(segPath)) return h.response("Segment not found").code(404);
+      return h.file(segPath)
+        .type("video/mp2t")
+        .header("Cache-Control", "no-cache")
+        .header("Access-Control-Allow-Origin", "*");
+    },
+  },
   {
     method: "GET",
     path: "/live.m3u8",
@@ -281,8 +487,16 @@ export const liveRoutes: ServerRoute[] = [
         stalkerApi.setActiveChannel(id);
       }
 
+      // proxy=1 forces proxying for browsers (they can't follow redirects to the
+      // upstream portal — mixed content/CORS); proxy=0 forces a direct redirect.
+      // Smart-TV webviews (Tizen/WebOS) are not CORS-bound and decode HLS natively,
+      // so they get a direct redirect and stream from the portal without server load.
+      const ua = String(request.headers["user-agent"] || "");
+      const isSmartTv = /Tizen|SMART-TV|SmartTV|Web0S|WebOS/i.test(ua);
+      const forceProxy = proxyParam === "1" && !isSmartTv;
+
       if (initialConfig.providerType === "xtream") {
-        const useProxy = initialConfig.proxy && proxyParam !== "0";
+        const useProxy = forceProxy || (initialConfig.proxy && proxyParam !== "0");
         if (useProxy) {
           const { liveStreamService } = await import("@/services/LiveStreamService");
           const { subpath } = request.query as { subpath?: string };
@@ -302,9 +516,7 @@ export const liveRoutes: ServerRoute[] = [
             if (redirectedUrl) {
               return h.redirect(redirectedUrl).code(302);
             }
-            return h
-              .response({ error: "Unable to fetch stream [Non Proxy]" })
-              .code(400);
+            return h.response({ error: "Unable to fetch stream [Non Proxy]" }).code(400);
           } catch (err: any) {
             logger.error(`Non-proxy error: ${err.message || err}`);
             return h.response({ error: "Stream fetch failed" }).code(500);
@@ -325,7 +537,7 @@ export const liveRoutes: ServerRoute[] = [
         }
       }
 
-      const useProxy = initialConfig.proxy && proxyParam !== "0";
+      const useProxy = forceProxy || (initialConfig.proxy && proxyParam !== "0");
       if (useProxy) return handleProxy(cmd, play, h);
       return handleNonProxy(cmd, h);
     },
@@ -413,6 +625,25 @@ export const liveRoutes: ServerRoute[] = [
         const segmentPath = record.segments.get(seqId);
         if (!segmentPath) return h.response("Segment path invalid").code(404);
 
+        // Kick off read-ahead for the following segment
+        prefetchNextSegment(cmd, seqId + 1, record);
+
+        // Serve from the read-ahead cache when possible (skip for Range requests)
+        if (!request.headers.range) {
+          const key = `${cmd}<_>${seqId}`;
+          const pending = segmentPrefetch.get<Promise<PrefetchedSegment>>(key);
+          if (pending) {
+            const pre = await pending;
+            if (pre) {
+              segmentPrefetch.del(key);
+              return h
+                .response(pre.data)
+                .type(pre.contentType)
+                .header("content-length", String(pre.data.length));
+            }
+          }
+        }
+
         const segmentUrl = new URL(segmentPath, record.baseUrl).href;
 
         try {
@@ -488,7 +719,7 @@ export const liveRoutes: ServerRoute[] = [
             .code(502);
         }
       } catch (err: any) {
-        console.error("[Player] Detailed Error:", err);
+        logger.error({ err }, "[Player] Detailed Error");
         logger.error(`[Player] Error fetching segment: ${err.message || err}`);
 
         return h

@@ -3,6 +3,7 @@ import { httpClient } from "@/utils/httpClient";
 import http from "http";
 import https, { RequestOptions } from "https";
 import { initialConfig } from "@/config/server";
+import { logger } from "@/utils/logger";
 
 function assertHttpUrl(raw: string) {
   const u = new URL(raw);
@@ -90,13 +91,15 @@ export const proxy: ServerRoute[] = [
 
       try {
         const decodedUrl = Buffer.from(url, "base64").toString("utf-8");
+        assertHttpUrl(decodedUrl);
         const referer = ref
           ? Buffer.from(ref, "base64").toString("utf-8")
           : undefined;
 
+        logger.info(`[/proxy/stream] ${request.info.remoteAddress} → ${decodedUrl}`);
         return await handleProxyStream(request, h, decodedUrl, referer);
       } catch (error: any) {
-        console.error("[/proxy/stream] error:", error.message || error);
+        logger.error("[/proxy/stream] error: " + (error?.message ?? error));
         if (error.response) {
           return h
             .response({ error: "Failed to fetch upstream content" })
@@ -118,12 +121,20 @@ export const proxy: ServerRoute[] = [
         >;
         if (!url) return h.response({ error: "No URL provided" }).code(400);
 
-        const decodedUrl = Buffer.from(url, "base64").toString("utf-8");
+        let decodedUrl = Buffer.from(url, "base64").toString("utf-8");
         const referer = ref
           ? Buffer.from(ref, "base64").toString("utf-8")
           : undefined;
 
+        // Stalker portal cmds (e.g. "ffrt http://...") — hand off to the live route which handles them properly
+        let isHttpUrl = true;
+        try { assertHttpUrl(decodedUrl); } catch { isHttpUrl = false; }
+        if (!isHttpUrl) {
+          return h.redirect(`/live.m3u8?cmd=${encodeURIComponent(decodedUrl)}`);
+        }
+
         const playlistUrl = assertHttpUrl(decodedUrl).href;
+        logger.info(`[/proxy] ${request.info.remoteAddress} → ${playlistUrl}`);
 
         const u = new URL(playlistUrl);
         const pathLower = u.pathname.toLowerCase();
@@ -163,16 +174,11 @@ export const proxy: ServerRoute[] = [
             contentType.includes("video/") ||
             contentType.includes("application/octet-stream")
           ) {
-            console.log(
-              `[SmartProxy] Detected binary content (${contentType}), streaming directly.`,
-            );
+            logger.info(`[SmartProxy] Detected binary content (${contentType}), streaming directly.`);
             return await handleProxyStream(request, h, playlistUrl, referer);
           }
         } catch (headErr) {
-          console.warn(
-            "[SmartProxy] HEAD request failed, falling back to GET",
-            headErr,
-          );
+          logger.warn({ err: headErr }, "[SmartProxy] HEAD request failed, falling back to GET");
         }
 
         const resp = await httpClient.get<string>(playlistUrl, {
@@ -234,7 +240,7 @@ export const proxy: ServerRoute[] = [
           .type("application/vnd.apple.mpegurl")
           .header("Cache-Control", "no-cache");
       } catch (err: any) {
-        console.error("[/proxy] error:", err?.message || err);
+        logger.error("[/proxy] error: " + (err?.message ?? err));
         return h.response({ error: "Failed to proxy playlist" }).code(500);
       }
     },

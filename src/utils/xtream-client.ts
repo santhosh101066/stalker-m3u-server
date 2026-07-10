@@ -13,6 +13,8 @@ import { IProvider } from "@/interfaces/Provider";
 import axios from "axios";
 import { initialConfig } from "@/config/server";
 import NodeCache from "node-cache";
+import { logger } from "@/utils/logger";
+import { CircuitBreaker } from "@/utils/circuitBreaker";
 
 function parseDurationToMinutes(durationStr: string | undefined): number {
   if (!durationStr) return 0;
@@ -68,17 +70,32 @@ function decodeBase64Safe(str: string): string {
   return str;
 }
 
+// Xtream portals base64-encode EPG titles; guard against plain-text portals
+function decodeBase64Title(s: string): string {
+  if (!s) return s;
+  // If it contains characters outside the base64 alphabet it's already plain text
+  if (!/^[A-Za-z0-9+/]+=*$/.test(s)) return s;
+  try {
+    const decoded = Buffer.from(s, "base64").toString("utf8");
+    return decoded || s;
+  } catch {
+    return s;
+  }
+}
+
+const PROVIDER_TIMEOUT = parseInt(process.env.PROVIDER_TIMEOUT || "120000", 10);
+
 export class XtreamClient implements IProvider {
   private baseUrl: string;
   private username: string;
   private password: string;
   private lastRequestTime: number = 0;
   private cache = new NodeCache({ stdTTL: 21600, checkperiod: 60 });
-  // Deduplicates concurrent requests for the same upstream key
   private inFlight = new Map<string, Promise<any>>();
+  private breaker = new CircuitBreaker("XtreamClient");
 
   constructor() {
-    const protocol = "http";
+    const protocol = initialConfig.https ? "https" : "http";
     this.baseUrl = `${protocol}://${initialConfig.hostname}:${initialConfig.port}`;
     this.username = initialConfig.username || "";
     this.password = initialConfig.password || "";
@@ -103,6 +120,10 @@ export class XtreamClient implements IProvider {
       return cachedData;
     }
 
+    if (this.breaker.isOpen()) {
+      throw new Error("XtreamClient circuit breaker is open — upstream provider is unavailable");
+    }
+
     // Deduplicate: if an identical request is already in-flight, wait for it
     if (this.inFlight.has(cacheKey)) {
       return this.inFlight.get(cacheKey)!;
@@ -120,14 +141,16 @@ export class XtreamClient implements IProvider {
           Accept: "*/*",
           "Accept-Encoding": "gzip, deflate, br",
         },
-        timeout: 120000, // 120 s — prevents server timeout on massive upstream payloads
+        timeout: PROVIDER_TIMEOUT,
       })
       .then((response) => {
+        this.breaker.recordSuccess();
         this.cache.set(cacheKey, response.data);
         return response.data;
       })
       .catch((error) => {
-        console.error("XtreamClient request failed:", error?.message ?? error);
+        this.breaker.recordFailure();
+        logger.error(`XtreamClient request failed: ${error?.message ?? error}`);
         throw error;
       })
       .finally(() => {
@@ -166,7 +189,7 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest({ action: "get_live_categories" });
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getChannelGroups expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getChannelGroups expected an array, got: ${typeof data}`);
       return { js: [] };
     }
 
@@ -184,14 +207,14 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest({ action: "get_live_streams" });
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getChannels expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getChannels expected an array, got: ${typeof data}`);
       return { js: { total_items: 0, max_page_items: 0, data: [] } };
     }
 
     const channels: Channel[] = data.map((item: any) => ({
       id: item.stream_id,
       name: item.name,
-      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/live/${this.username}/${this.password}/${item.stream_id}.m3u8`,
+      cmd: `${this.baseUrl}/live/${this.username}/${this.password}/${item.stream_id}.m3u8`,
       number: item.num,
       logo: item.stream_icon,
       tv_genre_id: item.category_id,
@@ -207,7 +230,7 @@ export class XtreamClient implements IProvider {
     };
   }
 
-  async getChannelLink(cmd: string): Promise<Data<Program>> {
+  async getChannelLink(cmd: string, startTime?: number, endTime?: number): Promise<Data<Program>> {
     return {
       js: {
         id: "0",
@@ -217,11 +240,12 @@ export class XtreamClient implements IProvider {
     };
   }
 
-  async getEPG(channelId: string): Promise<ArrayData<EPG_List>> {
+  async getEPG(channelId: string, date?: string): Promise<ArrayData<EPG_List>> {
     try {
       const data = await this.makeRequest({
         action: "get_short_epg",
         stream_id: channelId,
+        limit: 24,
       });
 
       let listings: any[] = [];
@@ -245,7 +269,7 @@ export class XtreamClient implements IProvider {
 
       return { js: epgList };
     } catch (error) {
-      console.error(`XtreamClient.getEPG failed for channel ${channelId}:`, error);
+      logger.error(`XtreamClient.getEPG failed for channel ${channelId}: ${error}`);
       return { js: [] };
     }
   }
@@ -254,7 +278,7 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest({ action: "get_vod_categories" });
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getMoviesGroups expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getMoviesGroups expected an array, got: ${typeof data}`);
       return { js: [] };
     }
 
@@ -311,7 +335,7 @@ export class XtreamClient implements IProvider {
           };
         }
       } catch (err) {
-        console.error("Error fetching get_vod_info for movieId:", params.movieId, err);
+        logger.error(`Error fetching get_vod_info for movieId ${params.movieId}: ${err}`);
       }
       return { js: { total_items: 0, max_page_items: 1, data: [] } };
     }
@@ -324,14 +348,14 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest(reqParams);
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getMovies expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getMovies expected an array, got: ${typeof data}`);
       return { js: { total_items: 0, max_page_items: 0, data: [] } };
     }
 
     const videos: Video[] = data.map((item: any) => ({
       id: item.stream_id,
       name: item.name,
-      cmd: `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${item.stream_id}.${item.container_extension}`,
+      cmd: `${this.baseUrl}/movie/${this.username}/${this.password}/${item.stream_id}.${item.container_extension}`,
 
       screenshot_uri: item.stream_icon,
       category_id: item.category_id,
@@ -392,9 +416,9 @@ export class XtreamClient implements IProvider {
         }
       }
     } catch (e) {
-      console.error("Error fetching movie container extension:", e);
+      logger.error(`Error fetching movie container extension: ${e}`);
     }
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/movie/${this.username}/${this.password}/${params.id}.${extension}`;
+    const url = `${this.baseUrl}/movie/${this.username}/${this.password}/${params.id}.${extension}`;
 
     return {
       js: {
@@ -407,7 +431,7 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest({ action: "get_series_categories" });
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getSeriesGroups expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getSeriesGroups expected an array, got: ${typeof data}`);
       return { js: [] };
     }
 
@@ -497,7 +521,6 @@ export class XtreamClient implements IProvider {
           const seasonEpisodesRaw = data.episodes[seasonNum];
           const episodesForSeason: Video[] = [];
 
-          // Map the episodes for this specific season
           if (Array.isArray(seasonEpisodesRaw)) {
             seasonEpisodesRaw.forEach((ep: any) => {
               let duration = 0;
@@ -510,7 +533,7 @@ export class XtreamClient implements IProvider {
               episodesForSeason.push({
                 id: ep.id,
                 name: ep.title || `Episode ${ep.episode_num}`,
-                cmd: `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
+                cmd: `${this.baseUrl}/series/${this.username}/${this.password}/${ep.id}.${ep.container_extension || "mp4"}`,
                 screenshot_uri: ep.info?.movie_image || data.info?.cover,
                 category_id: data.info?.category_id,
                 time: duration,
@@ -563,7 +586,7 @@ export class XtreamClient implements IProvider {
     const data = await this.makeRequest(reqParams);
     
     if (!Array.isArray(data)) {
-      console.warn("XtreamClient.getSeries expected an array, but got:", typeof data, data);
+      logger.warn(`XtreamClient.getSeries expected an array, got: ${typeof data}`);
       return { js: { total_items: 0, max_page_items: 0, data: [] } };
     }
 
@@ -625,6 +648,7 @@ export class XtreamClient implements IProvider {
     series: string;
     id: number;
     download: number;
+    cmd?: string;
   }): Promise<any> {
     let extension = "mp4";
     try {
@@ -645,14 +669,18 @@ export class XtreamClient implements IProvider {
         }
       }
     } catch (e) {
-      console.error("Error fetching episode container extension:", e);
+      logger.error(`Error fetching episode container extension: ${e}`);
     }
-    const url = `http://${initialConfig.hostname}:${initialConfig.port}/series/${this.username}/${this.password}/${params.id}.${extension}`;
+    const url = `${this.baseUrl}/series/${this.username}/${this.password}/${params.id}.${extension}`;
     return {
       js: {
         cmd: url,
       },
     };
+  }
+
+  async getVodLinkByCmd(cmd: string, series: number = 0): Promise<any> {
+    return { js: { cmd } };
   }
 
   isIdle(thresholdMs: number = 30000) {

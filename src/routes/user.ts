@@ -1,4 +1,5 @@
 import { ServerRoute } from "@hapi/hapi";
+import { logger } from "@/utils/logger";
 import { User } from "../models/User";
 import { UserProgress } from "../models/UserProgress";
 import { ConfigProfile } from "../models/ConfigProfile";
@@ -44,7 +45,7 @@ export const userRoutes: ServerRoute[] = [
           preferences: user.preferences || {}
         };
       } catch (error) {
-        console.error("Error fetching user profile:", error);
+        logger.error({ err: error }, "Error fetching user profile");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -79,7 +80,7 @@ export const userRoutes: ServerRoute[] = [
 
         return { success: true, preferences: user.preferences };
       } catch (error) {
-        console.error("Error updating user preferences:", error);
+        logger.error({ err: error }, "Error updating user preferences");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -100,7 +101,7 @@ export const userRoutes: ServerRoute[] = [
         });
         return progressRecords;
       } catch (error) {
-        console.error("Error fetching user progress:", error);
+        logger.error({ err: error }, "Error fetching user progress");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -134,7 +135,7 @@ export const userRoutes: ServerRoute[] = [
 
         return { success: true };
       } catch (error) {
-        console.error("Error updating progress:", error);
+        logger.error({ err: error }, "Error updating progress");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -168,7 +169,7 @@ export const userRoutes: ServerRoute[] = [
 
         return { success: true };
       } catch (error) {
-        console.error("Error clearing history:", error);
+        logger.error({ err: error }, "Error clearing history");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },
@@ -194,7 +195,7 @@ export const userRoutes: ServerRoute[] = [
         });
         return { success: true };
       } catch (error) {
-        console.error("Error deleting progress:", error);
+        logger.error({ err: error }, "Error deleting progress");
         return h.response({ error: "Internal Server Error" }).code(500);
       }
     },

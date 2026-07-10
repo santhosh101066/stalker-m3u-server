@@ -2,6 +2,8 @@ import { Channel } from "../models/Channel";
 import { Genre, GenreType } from "../models/Genre";
 import { EpgCache } from "../models/EpgCache";
 import { Op } from "sequelize";
+import { gzipSync, gunzipSync } from "zlib";
+import { logger } from "@/utils/logger";
 
 export async function writeJSON(filename: string, data: any) {
   try {
@@ -19,7 +21,7 @@ export async function writeJSON(filename: string, data: any) {
       }
     }
   } catch (error) {
-    console.error(`Error writing to database (${filename}):`, error);
+    logger.error({ err: error }, `Error writing to database (${filename})`);
     throw error;
   }
 }
@@ -58,7 +60,7 @@ export async function writeChannels(
       ],
     });
   } catch (error) {
-    console.error("Error writing channels to database:", error);
+    logger.error({ err: error }, "Error writing channels to database");
     throw error;
   }
 }
@@ -72,10 +74,10 @@ export async function readChannels(profileId?: number): Promise<any[]> {
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return channels.map(c => ({
       ...c,
-      id: prefix ? c.id.replace(new RegExp(`^${prefix}`), "") : c.id
+      id: c.id.replace(/^\d+_/, "")
     }));
   } catch (error) {
-    console.error("Error reading channels from database:", error);
+    logger.error({ err: error }, "Error reading channels from database");
     return [];
   }
 }
@@ -113,9 +115,46 @@ export async function writeGenres(
       ],
     });
   } catch (error) {
-    console.error(`Error writing ${type} genres to database:`, error);
+    logger.error({ err: error }, `Error writing ${type} genres to database`);
     throw error;
   }
+}
+
+export async function upsertGenres(
+  genres: any[],
+  type: GenreType,
+  profileId?: number,
+): Promise<void> {
+  const prefix = profileId !== undefined ? `${profileId}_` : ``;
+  const rows = genres.map((genre) => ({
+    ...genre,
+    id: `${prefix}${type}_${genre.id}`,
+    type,
+    profileId: profileId !== undefined ? profileId : null,
+  }));
+  await Genre.bulkCreate(rows, {
+    updateOnDuplicate: ["title", "number", "alias", "censored", "type", "profileId"],
+  });
+}
+
+export async function upsertGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.upsert({
+    id: `${prefix}${type}_${genre.id}`,
+    title: genre.title,
+    number: genre.number ?? null,
+    alias: genre.alias ?? null,
+    censored: genre.censored ?? 0,
+    type,
+    profileId,
+  });
+}
+
+export async function deleteGenre(genre: any, type: GenreType): Promise<void> {
+  const profileId = genre.profileId ?? null;
+  const prefix = profileId != null ? `${profileId}_` : ``;
+  await Genre.destroy({ where: { id: `${prefix}${type}_${genre.id}` } });
 }
 
 export async function readGenres(
@@ -134,10 +173,10 @@ export async function readGenres(
     const prefix = profileId !== undefined ? `${profileId}_` : ``;
     return genres.map((g) => ({
       ...g,
-      id: g.id.replace(new RegExp(`^${prefix}${type}_`), "").replace(new RegExp(`^${type}_`), ""),
+      id: g.id.replace(new RegExp(`^\\d+_${type}_`), "").replace(new RegExp(`^${type}_`), ""),
     }));
   } catch (error) {
-    console.error(`Error reading ${type} genres from database:`, error);
+    logger.error({ err: error }, `Error reading ${type} genres from database`);
     return [];
   }
 }
@@ -147,17 +186,18 @@ export async function writeEpgCache(
   profileId?: number,
 ): Promise<void> {
   try {
-    if (profileId !== undefined) {
-      await EpgCache.destroy({ where: { profileId } });
-    }
+    // Always destroy old rows before inserting to prevent accumulation.
+    // profileId=undefined means "no active profile" — destroy the null-profileId row.
+    const destroyWhere = profileId !== undefined ? { profileId } : { profileId: null };
+    await EpgCache.destroy({ where: destroyWhere });
 
+    const compressed = gzipSync(JSON.stringify(cacheData.data)).toString("base64");
     await EpgCache.create({
       timestamp: cacheData.timestamp,
-      data: JSON.stringify(cacheData.data),
+      data: compressed,
       profileId: profileId !== undefined ? profileId : null,
     });
   } catch (error) {
-    console.error("Error writing EPG cache to database:", error);
     throw error;
   }
 }
@@ -171,12 +211,15 @@ export async function readEpgCache(profileId?: number): Promise<any | null> {
 
     if (!cache) return null;
 
-    return {
-      timestamp: cache.timestamp,
-      data: JSON.parse(cache.data),
-    };
+    let parsed: any;
+    try {
+      parsed = JSON.parse(gunzipSync(Buffer.from(cache.data, "base64")).toString());
+    } catch {
+      parsed = JSON.parse(cache.data);
+    }
+    return { timestamp: cache.timestamp, data: parsed };
   } catch (error) {
-    console.error("Error reading EPG cache from database:", error);
+    logger.error({ err: error }, "Error reading EPG cache from database");
     return null;
   }
 }

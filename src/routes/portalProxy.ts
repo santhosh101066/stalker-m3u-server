@@ -2,6 +2,7 @@ import { ServerRoute } from "@hapi/hapi";
 import http from "http";
 import https from "https";
 import { initialConfig } from "@/config/server";
+import { logger } from "@/utils/logger";
 
 export const portalProxy: ServerRoute[] = [
   {
@@ -58,7 +59,7 @@ export const portalProxy: ServerRoute[] = [
         );
 
         upstreamReq.on("error", (err) => {
-          console.error("Proxy error:", err);
+          logger.error({ err }, "Proxy error");
           reject(h.response("Proxy failed").code(500));
         });
       });
